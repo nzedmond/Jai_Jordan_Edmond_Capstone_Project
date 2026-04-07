@@ -1,7 +1,7 @@
 """
-capture.py — OpenCV frame capture with high-resolution timestamps.
+OpenCV frame capture with high-resolution timestamps.
 
-Usage:
+Run:
     python capture.py                  # webcam (device 0)
     python capture.py --source 1       # webcam device 1
     python capture.py --source video.mp4
@@ -68,7 +68,7 @@ def run(source: str, timestamp_format: str) -> None:
     frame_index = 0
     try:
         while True:
-            loop_start = time.monotonic()
+            loop_start = time.monotonic()  # Start time of the loop iteration
 
             ret, frame = cap.read()
             if not ret:
@@ -93,11 +93,11 @@ def run(source: str, timestamp_format: str) -> None:
 
             print(f"[{timestamp}] frame_index={frame_index}")
 
-            cv2.imshow("capture.py — press q to quit", frame)
+            cv2.imshow("capture.py: press q to quit", frame)
 
             frame_index += 1
 
-            # Honour the target frame rate for live webcams
+            #  target frame rate for live webcams
             elapsed = time.monotonic() - loop_start
             wait_ms = max(1, int((frame_duration - elapsed) * 1_000))
 
