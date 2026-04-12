@@ -1,4 +1,5 @@
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Optional
@@ -22,11 +23,22 @@ class CameraSource:
         if not self.cap.isOpened():
             raise RuntimeError(f"Cannot open source: {source}")
 
-        self.frame: Optional[any] = None
+        self._frame: Optional[any] = None
+        self._frame_lock = threading.Lock()
         self.running = True
         self.frame_index = 0
         self.fps = self.cap.get(cv2.CAP_PROP_FPS) or 30.0
         self.frame_duration = 1.0 / self.fps
+
+    @property
+    def frame(self) -> Optional[any]:
+        with self._frame_lock:
+            return self._frame
+
+    @frame.setter
+    def frame(self, value: Optional[any]) -> None:
+        with self._frame_lock:
+            self._frame = value
 
     def read(self) -> Optional[any]:
         ret, frame = self.cap.read()
@@ -47,7 +59,7 @@ class CameraSource:
         )
         print(f"[{timestamp}] [{self.source}] frame_index={self.frame_index}")
         self.frame_index += 1
-        self.frame = frame
+        self.frame = frame  # goes through the lock-protected setter
         return frame
 
     def release(self):
