@@ -7,8 +7,9 @@ from typing import Optional
 import cv2
 
 
-def format_timestamp(fmt: str) -> str:
-    now = datetime.now(tz=timezone.utc)
+def format_timestamp(fmt: str, now: Optional[datetime] = None) -> str:
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
     if fmt == "epoch_ms":
         return str(int(now.timestamp() * 1_000))
     # ISO 8601 with millisecond precision, e.g. 2026-04-06T14:32:01.123Z
@@ -24,6 +25,7 @@ class CameraSource:
             raise RuntimeError(f"Cannot open source: {source}")
 
         self._frame: Optional[any] = None
+        self._frame_ts_ms: int = 0
         self._frame_lock = threading.Lock()
         self.running = True
         self.frame_index = 0
@@ -40,13 +42,20 @@ class CameraSource:
         with self._frame_lock:
             self._frame = value
 
+    def get_frame(self) -> tuple:
+        """Return (frame, ts_ms) atomically — safe to call from any thread."""
+        with self._frame_lock:
+            return self._frame, self._frame_ts_ms
+
     def read(self) -> Optional[any]:
         ret, frame = self.cap.read()
         if not ret:
             return None
 
-        timestamp = format_timestamp(self.timestamp_format)
-        label = f"{timestamp} | frame {self.frame_index}"
+        now = datetime.now(tz=timezone.utc)
+        ts_ms = int(now.timestamp() * 1_000)
+        label_ts = format_timestamp(self.timestamp_format, now)
+        label = f"{label_ts} | frame {self.frame_index}"
         cv2.putText(
             frame,
             label,
@@ -57,9 +66,11 @@ class CameraSource:
             2,
             cv2.LINE_AA,
         )
-        print(f"[{timestamp}] [{self.source}] frame_index={self.frame_index}")
+        print(f"[{label_ts}] [{self.source}] frame_index={self.frame_index}")
         self.frame_index += 1
-        self.frame = frame  # goes through the lock-protected setter
+        with self._frame_lock:  # write frame + timestamp atomically
+            self._frame = frame
+            self._frame_ts_ms = ts_ms
         return frame
 
     def release(self):
