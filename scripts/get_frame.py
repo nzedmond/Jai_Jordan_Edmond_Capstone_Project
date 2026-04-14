@@ -107,107 +107,119 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
-    '''run a TCP server that receives one or more JPEG-encoded video streams, decodes them, and displays them in real time. 
-    Two modes: 1) simple display of latest frames from each stream, or 2) synchronized display using a jitter buffer to align frames by their capture timestamps.'''
-    
-    args = parse_args()
-
+def create_server(host: str, port: int):
+    """Bind a TCP server socket, accept one connection, and return both."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((args.host, args.port))
+    server.bind((host, port))
     server.listen(1)
-    print(f"[INFO] Listening on {args.host}:{args.port} ...")
-
+    print(f"[INFO] Listening on {host}:{port} ...")
     conn, addr = server.accept()
     print(f"[INFO] Connection from {addr}")
+    return server, conn
 
-    sync_buf = None
-    if args.sync:
-        from sync import SyncBuffer
-        sync_buf = SyncBuffer(
-            stream_ids=args.stream_ids,
-            buffer_delay_ms=args.buffer_delay_ms,
-            target_fps=args.fps,
-            csv_path=args.csv,
-        )
-        print(
-            f"[INFO] Sync mode ON — buffer_delay={args.buffer_delay_ms}ms  "
-            f"fps={args.fps}  streams={args.stream_ids}"
-        )
-        if args.csv:
-            print(f"[INFO] Logging metrics to {args.csv}")
+
+def create_sync_buffer(args):
+    """Return a SyncBuffer if --sync was requested, otherwise None."""
+    if not args.sync:
+        return None
+    from sync import SyncBuffer
+    sync_buf = SyncBuffer(
+        stream_ids=args.stream_ids,
+        buffer_delay_ms=args.buffer_delay_ms,
+        target_fps=args.fps,
+        csv_path=args.csv,
+    )
+    print(
+        f"[INFO] Sync mode ON — buffer_delay={args.buffer_delay_ms}ms  "
+        f"fps={args.fps}  streams={args.stream_ids}"
+    )
+    if args.csv:
+        print(f"[INFO] Logging metrics to {args.csv}")
+    return sync_buf
+
+
+def start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter):
+    """Spawn the background receive thread and return it."""
+    t = threading.Thread(
+        target=_receive_loop,
+        args=(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter),
+        daemon=True,
+    )
+    t.start()
+    return t
+
+
+def combine_frames(frames_dict: dict):
+    """Stack frames from a {cam_id: frame} dict side-by-side."""
+    tiles = [frames_dict[k] for k in sorted(frames_dict)]
+    return np.hstack(tiles) if len(tiles) > 1 else tiles[0]
+
+
+def overlay_sync_stats(frame, result: dict, stream_ids: list) -> None:
+    """Annotate a combined frame with sync-error and per-stream latency."""
+    lat_a = result["latencies"].get(stream_ids[0], 0)
+    lat_b = result["latencies"].get(stream_ids[1], 0)
+    cv2.putText(
+        frame,
+        f"sync_err={result['sync_error_ms']}ms  lat=({lat_a},{lat_b})ms",
+        (10, 30),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.7,
+        (0, 255, 0),
+        2,
+    )
+
+
+def run_sync_display(sync_buf, stop_event: threading.Event, stream_ids: list, frame_interval: float) -> None:
+    """Display loop for synchronized multi-stream mode."""
+    displayed = 0
+    while not stop_event.is_set():
+        result = sync_buf.try_consume()
+        if result:
+            combined = combine_frames(result["frames"])
+            overlay_sync_stats(combined, result, stream_ids)
+            cv2.imshow("Synchronized streams (press q to quit)", combined)
+            displayed += 1
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("[INFO] 'q' pressed — shutting down.")
+            break
+        time.sleep(frame_interval)
+    print(f"[INFO] Displayed {displayed} synchronized frame pairs.")
+
+
+def run_simple_display(latest_frames: dict, frame_lock: threading.Lock, frame_counter: list,
+                       stop_event: threading.Event, frame_interval: float) -> None:
+    """Display loop for simple latest-frame mode."""
+    while not stop_event.is_set():
+        with frame_lock:
+            snapshot = dict(latest_frames)
+        if snapshot:
+            cv2.imshow("get_frame (press q to quit)", combine_frames(snapshot))
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            print("[INFO] 'q' pressed — shutting down.")
+            break
+        time.sleep(frame_interval)
+    print(f"[INFO] Received {frame_counter[0]} frames total.")
+
+
+def main():
+    args = parse_args()
+    server, conn = create_server(args.host, args.port)
+    sync_buf = create_sync_buffer(args)
 
     stop_event = threading.Event()
     latest_frames: dict = {}
     frame_lock = threading.Lock()
     frame_counter = [0]  # mutable int for the receive thread
-
-    recv_thread = threading.Thread(
-        target=_receive_loop,
-        args=(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter),
-        daemon=True,
-    )
-    recv_thread.start()
+    start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter)
 
     frame_interval = 1.0 / args.fps
-
     try:
         if args.sync:
-            # --- Synchronized display ---
-            displayed = 0
-            while not stop_event.is_set():
-                result = sync_buf.try_consume()
-                if result:
-                    frames_list = [
-                        result["frames"][sid]
-                        for sid in sorted(result["frames"])
-                    ]
-                    combined = np.hstack(frames_list)
-
-                    sync_err = result["sync_error_ms"]
-                    lat_a = result["latencies"].get(args.stream_ids[0], 0)
-                    lat_b = result["latencies"].get(args.stream_ids[1], 0)
-                    cv2.putText(
-                        combined,
-                        f"sync_err={sync_err}ms  lat=({lat_a},{lat_b})ms",
-                        (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 255, 0),
-                        2,
-                    )
-                    cv2.imshow("Synchronized streams (press q to quit)", combined)
-                    displayed += 1
-
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("[INFO] 'q' pressed — shutting down.")
-                    break
-                time.sleep(frame_interval)
-
-            print(f"[INFO] Displayed {displayed} synchronized frame pairs.")
-
+            run_sync_display(sync_buf, stop_event, args.stream_ids, frame_interval)
         else:
-            # --- Simple display: show each camera's latest frame as it arrives ---
-            shown = 0
-            while not stop_event.is_set():
-                with frame_lock:
-                    snapshot = dict(latest_frames)
-                    local_count = frame_counter[0]
-
-                if snapshot:
-                    tiles = [snapshot[k] for k in sorted(snapshot)]
-                    combined = np.hstack(tiles) if len(tiles) > 1 else tiles[0]
-                    cv2.imshow("get_frame (press q to quit)", combined)
-                    shown = local_count
-
-                if cv2.waitKey(1) & 0xFF == ord("q"):
-                    print("[INFO] 'q' pressed — shutting down.")
-                    break
-                time.sleep(frame_interval)
-
-            print(f"[INFO] Received {frame_counter[0]} frames total.")
-
+            run_simple_display(latest_frames, frame_lock, frame_counter, stop_event, frame_interval)
     except KeyboardInterrupt:
         print("\n[INFO] KeyboardInterrupt — shutting down.")
     finally:
