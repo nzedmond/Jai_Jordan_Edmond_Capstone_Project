@@ -11,8 +11,13 @@ import single_cam
 from multicam_handler import capture_loop
 
 '''Usage:
+1. simple (both streams shown b=side-by-side, latest frame per camera):
+    python transport.py --sources 0 1 --host 0.0.0.0 --port 9000
+2. sync mode (add artificial jitter to test transport delay effects):
+    python transport.py --sources 0 1 --host 0.0.0.0 --port 9000 --base-delay-ms 50 --jitter-ms 10
+3. adjust JPEG quality (tradeoff between latency and image quality):
     python transport.py --sources 0 1 --host 192.168.1.10 --port 9000 --jpeg-quality 85
-    python transport.py --sources 0 1 --host 192.168.1.10 --port 9000 --base-delay-ms 50 --jitter-ms 10'''
+ '''
 
 
 # Header layout (13 bytes, big-endian):

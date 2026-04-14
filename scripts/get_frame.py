@@ -7,10 +7,13 @@ import time
 import cv2
 import numpy as np
 
-'''Usage (simple display, single or multi-cam):
+'''Usage:
+1. (simple display, single or multi-cam):
     python get_frame.py --port 9000
+2. sync mode (jitter buffer aligning frames by timestamp):
+    python get_frame.py --port 9000 --sync --buffer-delay-ms 100
 
-Usage (synchronized display with CSV logging):
+2. (synchronized display with CSV logging):
     python get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
     python get_frame.py --port 9000 --sync --buffer-delay-ms 0   --csv logs/no_buf.csv
     python get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv'''
@@ -175,7 +178,7 @@ def overlay_sync_stats(frame, result: dict, stream_ids: list) -> None:
     cv2.putText(
         frame,
         f"sync_err={result['sync_error_ms']}ms  lat=({lat_a},{lat_b})ms",
-        (10, 30),
+        (10, 100),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.7,
         (0, 255, 0),
