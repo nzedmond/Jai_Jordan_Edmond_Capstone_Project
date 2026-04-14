@@ -118,3 +118,22 @@ pip install opencv-python numpy
 ```
 
 Python 3.10+ recommended. All other dependencies (`socket`, `struct`, `threading`, `concurrent.futures`) are from the standard library.
+
+
+## RUNNING MEASUREMENTS
+**Experiment 01: no buffer**
+terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 0 --csv logs/no_buf.csv`
+terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+
+**Experiment 02: buffer = 100ms**
+terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/buf100.csv`
+terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+
+**Experiment 03: buffer = 300ms**
+terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv`
+terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+
+**After all the three experiments, analyze them together by running:**
+`python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv`
+
+
