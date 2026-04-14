@@ -17,6 +17,10 @@ def format_timestamp(fmt: str, now: Optional[datetime] = None) -> str:
 
 
 class CameraSource:
+    '''Captures frames from a webcam or video file, annotates them with timestamps, and provides thread-safe access to the latest frame and its timestamp.
+    Args:
+    - source: Camera index or path/URL to a video source, given as a string.
+    - timestamp_format: Format for timestamp labels (iso or epoch_ms)'''
     def __init__(self, source: str, timestamp_format: str = "iso"):
         self.source = int(source) if source.isdigit() else source
         self.timestamp_format = timestamp_format
@@ -43,11 +47,13 @@ class CameraSource:
             self._frame = value
 
     def get_frame(self) -> tuple:
-        """Return (frame, ts_ms) atomically — safe to call from any thread."""
+        """Return (frame, ts_ms) atomically to avoid race conditions between frame updates and reads."""
         with self._frame_lock:
             return self._frame, self._frame_ts_ms
 
     def read(self) -> Optional[any]:
+        '''Read the next frame from the video source, annotate it with a timestamp label, and store it along with its timestamp in milliseconds. Returns the annotated frame or None if reading fails.'''
+        
         ret, frame = self.cap.read()
         if not ret:
             return None

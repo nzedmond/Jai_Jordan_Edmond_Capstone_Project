@@ -9,6 +9,8 @@ import single_cam
 
 
 def capture_loop(cam: single_cam.CameraSource):
+    '''grab frames until the source is exhausted or an error occurs, then signal shutdown by setting cam.running to False.'''
+    
     while cam.running:
         frame = cam.read()
         if frame is None:
