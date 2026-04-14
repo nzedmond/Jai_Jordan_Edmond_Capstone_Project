@@ -151,9 +151,21 @@ def start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, 
 
 
 def combine_frames(frames_dict: dict):
-    """Stack frames from a {cam_id: frame} dict side-by-side."""
+    """Stack frames from a {cam_id: frame} dict side-by-side.
+
+    Frames are resized to a common height (the tallest frame) before
+    horizontal stacking, so mismatched resolutions don't raise a ValueError.
+    """
     tiles = [frames_dict[k] for k in sorted(frames_dict)]
-    return np.hstack(tiles) if len(tiles) > 1 else tiles[0]
+    if len(tiles) == 1:
+        return tiles[0]
+    target_h = max(f.shape[0] for f in tiles)
+    resized = [
+        cv2.resize(f, (int(f.shape[1] * target_h / f.shape[0]), target_h))
+        if f.shape[0] != target_h else f
+        for f in tiles
+    ]
+    return np.hstack(resized)
 
 
 def overlay_sync_stats(frame, result: dict, stream_ids: list) -> None:
