@@ -23,3 +23,6 @@ Thumbs.db
 # Video files
 *.mp4
 *.MP4
+
+# Study comparisons
+Other_studies/
