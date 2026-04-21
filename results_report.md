@@ -142,3 +142,12 @@ Because Phase 2 frames (≈56 per run) constitute roughly **25%** of logged fram
 3. Use real webcam sources, where both cameras naturally produce frames at the same wall-clock rate (For our next experiments).
 
 **To measure buffer-depth accuracy tradeoffs**, we'll re-run the experiments with heavier jitter.
+
+## 7. Integrating Above Measurement Method with IP Cameras
+
+We then repeated the same experiment process, but instead of using video sources, we used a Tapo C211 WiFi camera and the native Macbook webcam as the sources. Furthermore, since there was no need for jitter or base delay to simulate network conditions over a real network, only buffer delay was included. What this revealed was the current major flaw in our synchronization algorithm.
+
+The graphs display the latency of Cam A (Macbook) and Cam B (Wifi cam).
+![IPCam-Results](figures/latency_histogram-jordan.png)
+
+As it can be seen, increasing the buffer delay from 0 to 300 did reduce the latency between the two cameras. However, what was observed on the screen was not a significant improvement in perfomance. Analyzing the logs, it is clear that there is not a change in what is observed because the Macbook cam is capturing at 30 fps while the IP cam is capturing at 15 fps. This descrepancy in framrates means that our current synchronization algorithm fails to account for the extra frames arriving from the Macbook webcam. Since the frames are not timestamped when they are captured but only as they arrive at the receiver, this poses a challenge to aligning frames captured on devices with different capture framerates. This motivates future directions in improving our algorithm, in which we would aim to determine the higher framerate and drop frames from it to match the lowest framerate of the video sources available.
