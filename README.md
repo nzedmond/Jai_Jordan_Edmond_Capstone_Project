@@ -144,4 +144,22 @@ terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/tes
 `python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv`
 ```
 
+## RUNNING WITH IP CAM
+
+For this experiment, we used a tapo C211 WiFi camera. This camera works with rtsp after a quick setup within the tapo app. Because the Colgate WiFi does not support this kind of device to device communication, we had to set up a local ad-hoc network using a Macbook as the "router", which the camera would connect to. The camera was set to have a static IP within the tapo app.
+
+The general formula for an rtsp cam url is rtsp://USERNAME:PASSWORD@IP_address:PORT/path
+
+To test our camera connection, we directly displayed the IP camera video by running:
+```bash
+python capture.py --sources rtsp://jshapiro@colgate.edu:Orlando0@192.168.2.4:554/stream1 
+```
+
+Then, the command with `transport.py` was run like below to connect to the camera:
+```bash
+python3 scripts/transport.py --sources 1 rtsp://jshapiro@colgate.edu:Orlando0@192.168.2.4:554/stream1 --host 0.0.0.0 --port 9000
+```
+
+Here, source 1 is the native Macbook webcam, and the rtsp url is used to connect to the WiFi cam. We ran the same three experiments and analysis above comparing the built-in Macbook webcam to the tapo cam broadcasting over the network.
+
 
