@@ -121,7 +121,6 @@ Because Phase 2 frames (≈56 per run) constitute roughly **25%** of logged fram
 
 **`latency_histogram.png`:** Camera B shows a narrow unimodal distribution that shifts right by approximately the buffer depth across runs (medians: 174 ms → 181 ms → 366 ms). Camera A shows a bimodal distribution: a small Phase 1 cluster near normal latency and a right tail from Phase 2 frozen-frame latency. The median markers reflect the overall distribution; Phase 1-only medians would be in the 200–400 ms range (network + buffer) for Camera A as well.
 
-- > NOTE: WE USED CLAUDE AI TO ASSIST INTERPRETING THE SYNC_ERROR_CDF AND THE LATENCY_HISTOGRAM GRAPHS.
 ---
 
 ## 6. Conclusions

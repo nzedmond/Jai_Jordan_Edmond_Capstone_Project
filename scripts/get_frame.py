@@ -180,7 +180,7 @@ def overlay_sync_stats(frame, result: dict, stream_ids: list) -> None:
         f"sync_err={result['sync_error_ms']}ms  lat=({lat_a},{lat_b})ms",
         (10, 100),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        2.0,
         (0, 255, 0),
         2,
     )
