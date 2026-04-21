@@ -32,8 +32,23 @@ scripts/
     multicam_handler.py  # Multi-camera local display in a grid layout
     transport.py         # TCP sender: captures frames, encodes JPEG, sends with header
     get_frame.py         # TCP receiver: parses header, decodes JPEG, displays frames
+    sync.py              # SyncBuffer — jitter-buffer synchronizer for multi-stream alignment
+    analyze_sync.py      # Reads experiment CSVs and produces sync error / latency plots
+    figures/
+        sync_error_over_time.png  # Plot: sync error vs. frame index
+        sync_error_cdf.png        # Plot: CDF of absolute sync error
+        latency_histogram.png     # Plot: per-stream latency distributions
 videos/
     test_01.mp4          # Sample video for testing without a live camera
+    test_02.mp4          # Second sample video (simulates a second camera stream)
+logs/
+    run.csv              # Per-frame sync metrics logged by get_frame.py --sync --csv
+notes/
+    syncAlgo.md          # Walkthrough of the synchronization algorithm design
+tests/
+    one_line_recv.txt    # Test fixture for the TCP receive path
+requirements.txt         # Python dependencies
+Jordan_Jai_Edmond_Capstone Project Proposal.pdf
 ```
 
 ---
@@ -41,7 +56,7 @@ videos/
 ## Scripts
 
 ### `capture.py` — single-camera preview
-Reads from one source and overlays a UTC timestamp on every frame. Useful for verifying a camera works before using the multi-camera pipeline.
+Reads from one source and overlays a UTC timestamp on every frame. For verifying if a camera works before using the multi-camera pipeline.
 
 ```bash
 python capture.py                        # webcam (device 0)
@@ -53,7 +68,7 @@ python capture.py --timestamp-format epoch_ms
 ---
 
 ### `multicam_handler.py` — local multi-camera display
-Opens multiple sources simultaneously (each in its own thread) and displays them in a grid window. No network involved — useful for local testing and verifying timestamp alignment before introducing transport.
+Opens multiple sources simultaneously (each in its own thread) and displays them in a grid window. No network involved: For local testing and verifying timestamp alignment before introducing transport.
 
 ```bash
 python multicam_handler.py --sources 0 1
@@ -94,11 +109,13 @@ python transport.py --sources 0 1 --host 127.0.0.1 --port 9000 --jpeg-quality 85
 
 | Flag | Default | Description |
 |---|---|---|
-| `--sources` | required | Camera sources |
+| `--sources` | required | Camera sources (device index, file path, or RTSP URL) |
 | `--host` | required | Receiver host |
 | `--port` | required | Receiver port |
-| `--timestamp-format` | `iso` | Timestamp format for on-frame label |
+| `--timestamp-format` | `iso` | `iso` (ISO 8601 ms) or `epoch_ms` (Unix ms) |
 | `--jpeg-quality` | `90` | JPEG encoding quality (1–100) |
+| `--base-delay-ms` | `0` | Fixed artificial delay per packet in ms (simulates network latency) |
+| `--jitter-ms` | `0` | Uniform jitter half-range per packet in ms (simulates network jitter) |
 
 `get_frame.py` flags:
 
@@ -106,15 +123,63 @@ python transport.py --sources 0 1 --host 127.0.0.1 --port 9000 --jpeg-quality 85
 |---|---|---|
 | `--port` | required | Port to listen on |
 | `--host` | `0.0.0.0` | Bind address |
+| `--sync` | off | Enable jitter-buffer synchronization (requires two camera streams) |
+| `--buffer-delay-ms` | `100` | Jitter buffer depth in ms — larger values reduce sync error at the cost of latency |
+| `--fps` | `30.0` | Target playback frame rate |
+| `--csv` | none | Path to write per-frame sync metrics CSV (only used with `--sync`) |
+| `--stream-ids` | `0 1` | Camera IDs to synchronize |
 
 Press `q` in the display window or `Ctrl+C` in either terminal to shut down cleanly.
+
+---
+
+### `sync.py` — jitter-buffer synchronizer
+
+`SyncBuffer` aligns frames from N camera streams by capture timestamp. Each stream gets its own min-heap; `try_consume()` is called by the display loop at `target_fps` and picks, per stream, the most recent frame captured at or before `now - buffer_delay_ms`. If a stream has no qualifying frame it freezes on the last good frame. Sync error and per-stream latency are recorded each frame.
+
+```python
+from sync import SyncBuffer
+
+buf = SyncBuffer(stream_ids=[0, 1], buffer_delay_ms=100, csv_path="logs/run.csv")
+buf.push(cam_id=0, ts_ms=capture_ts, frame=bgr_frame)  # from receive thread
+result = buf.try_consume()   # from display thread — returns frames + metrics
+buf.close()                  # flushes CSV
+```
+
+---
+
+### `analyze_sync.py` — experiment analysis
+
+Reads one or more CSV logs produced by `get_frame.py --sync --csv` and generates three plots saved to `scripts/figures/`:
+
+1. Sync error over time (frame index)
+2. CDF of absolute sync error (with p50/p95 markers)
+3. Latency histogram for both streams (with median annotations)
+
+```bash
+python scripts/analyze_sync.py logs/run.csv
+python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv
+python scripts/analyze_sync.py logs/run.csv --no-show --out figures/
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `csvs` | required | One or more CSV log files |
+| `--out` | `figures/` | Output directory for PNG plots |
+| `--no-show` | off | Save plots without displaying them interactively |
 
 ---
 
 ## Dependencies
 
 ```bash
-pip install opencv-python numpy
+pip install -r requirements.txt
+```
+
+Or individually:
+
+```bash
+pip install opencv-python numpy matplotlib pandas
 ```
 
 Python 3.10+ recommended. All other dependencies (`socket`, `struct`, `threading`, `concurrent.futures`) are from the standard library.

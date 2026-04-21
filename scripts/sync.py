@@ -69,10 +69,6 @@ class _StreamBuffer:
         return len(self._heap)
 
 
-# ---------------------------------------------------------------------------
-# Public synchronizer
-# ---------------------------------------------------------------------------
-
 class SyncBuffer:
     """Jitter buffer that aligns frames from N camera streams by timestamp.
 
@@ -136,9 +132,6 @@ class SyncBuffer:
             self._csv_writer = csv.writer(self._csv_file)
             self._csv_writer.writerow(self.CSV_COLUMNS)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def push(self, cam_id: int, ts_ms: int, frame: np.ndarray) -> None:
         """Enqueue a received frame into the appropriate stream buffer."""
