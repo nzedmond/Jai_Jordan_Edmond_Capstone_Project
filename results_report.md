@@ -3,6 +3,11 @@
 
 ## NOTE: VIDEOS USED DURING THIS EXPERIMENT CAN BE SHARED VIA GOOGLE DRIVE IF NEEDED BUT THE EXPERIMENT RESULTS AND THEIR INTERPRETATIONS SHOULD BE THE SAME FOR ANY VIDEO/VIDEO SOURCE USED. 
 
+## How the Algorithm Works
+
+> When a frame arrives from any camera source, `push()` adds it into that camera's mini-heap sorted by capture timestamp. The heap ensures frames are always processed in chronological order, even if they arrive out of order the network. A monotonic sequence counter breaks ties.
+> The display loop calls `try_consume()` at the target framerate. For each call, a cutoff is computed: `now_ms - buffer_delay_ms`. Any frame captured before that moment is old enough to display. For each stream, `pop_up_to(cutoff)` drains all eligible frames and returns the most recent one. If a stream has no eligible frame yet, it freezes on its last good frame rather than going blank. ONce every stream has produced at least one frame, the method returns a dictionary with the aligned frame pair, a `sync_error_ms` (the timestamp gap between the twi chosen frames), and per-stream latencies. The `buffer_delay_ms` is the core tradeoff: larger values give slower streams more time to catch up (lower sync error) at the cost of displaying older frames (higher latency).
+
 ## 1. Setup
 
 Three experiments tested how jitter-buffer depth (`buffer_delay_ms`) affects frame-alignment accuracy and end-to-end latency in a two-stream TCP video system.

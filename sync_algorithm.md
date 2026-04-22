@@ -6,7 +6,7 @@ The system has two sides: a **sender** (`transport.py` + `single_cam.py`) and a 
 
 ---
 
-## Step 1 — Capture and timestamping (`single_cam.py`)
+## Step 1: Capture and timestamping (`single_cam.py`)
 
 When `CameraSource.read()` is called:
 
@@ -16,7 +16,7 @@ When `CameraSource.read()` is called:
 
 ---
 
-## Step 2 — Sending with a packet header (`transport.py`)
+## Step 2: Sending with a packet header (`transport.py`)
 
 `send_frames()` runs on the main thread while capture threads run concurrently. For every camera, it calls `cam.get_frame()` and sends a packet structured as:
 
@@ -31,7 +31,7 @@ We noted two things here:
 
 ---
 
-## Step 3 — Receiving and decoding (`get_frame.py`)
+## Step 3: Receiving and decoding (`get_frame.py`)
 
 The background thread `_receive_loop`:
 
@@ -43,11 +43,11 @@ The background thread `_receive_loop`:
 
 ---
 
-## Step 4 — The jitter buffer (`sync.py`)
+## Step 4: The jitter buffer (`sync.py`)
 
 The actual synchronization algorithm has two parts:
 
-### `_StreamBuffer` — a min-heap per stream
+### `_StreamBuffer`: a min-heap per stream
 (We used a min-heap here because frames aren't expected to arrive in the correct order. We need to keep the earliest-timestamp frame at the top so that `pop_up_to(cutoff)` always always processes frames in chronological order.)
 
 Each camera stream gets its own min-heap, sorted by `ts_ms`. A monotonic sequence counter is used as a tie-breaker so numpy arrays are never compared directly (which would crash).
@@ -55,7 +55,7 @@ Each camera stream gets its own min-heap, sorted by `ts_ms`. A monotonic sequenc
 - `push(ts_ms, frame)` — inserts into the heap.
 - `pop_up_to(cutoff_ts_ms)` — **drains all frames older than the cutoff** and returns the most recent one among them. Frames that are even older than "the most recent eligible one" are discarded.
 
-### `try_consume()` — producing one aligned frame set
+### `try_consume()`: producing one aligned frame set
 
 Called by the display loop at `target_fps`. Here is how it works:
 
