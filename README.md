@@ -185,7 +185,7 @@ pip install opencv-python numpy matplotlib pandas
 Python 3.10+ recommended. All other dependencies (`socket`, `struct`, `threading`, `concurrent.futures`) are from the standard library.
 
 
-## RUNNING MEASUREMENTS
+## RUNNING MEASUREMENTS WITH PRERECORDED VIDEOS
 - **Experiment 01: no buffer**
 ```bash
 terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 0 --csv logs/no_buf.csv`
