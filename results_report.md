@@ -141,12 +141,15 @@ Because Phase 2 frames (≈56 per run) constitute roughly **25%** of logged fram
 
 - The effect of buffer depth on sync accuracy is **not measurable** from these runs because the jitter (±30 ms) is smaller than even the smallest buffer (100 ms). The buffer's accuracy benefit requires jitter larger than the buffer depth. (We may have to test the buffer's accuracy and icnlude the results in our final report, after we've worked with webcams/external cameras for real world scenarios.)
 
-**To eliminate Phase 2 entirely (What we'll work on for the next week)**, the videos need identical decode speeds, not just identical frame counts. Options:
+**To eliminate Phase 2 entirely**, the videos need identical decode speeds, not just identical frame counts. Options:
 1. Transcode both to the same codec/bitrate/resolution before running experiments.
 2. Add a `--fps` rate-limiter to `capture_loop` so both threads advance at the same pace regardless of file size.
 3. Use real webcam sources, where both cameras naturally produce frames at the same wall-clock rate (For our next experiments).
 
-**To measure buffer-depth accuracy tradeoffs**, we'll re-run the experiments with heavier jitter.
+**Future Sync Algorithm Considerations: NTP Timestamp Protocol/PTP Integration**
+Summarizing the description of our synchronization algorithm that can be found [here](./sync_algorithm.md), as well as discussions regarding its implementation, the algorithm currently works based on when the server receives a time for a given frame alongside a given "buffer window", and not based on an overall standard 'correct' time. However, during experimentation, we hypothesized that we can optimize our synchronization algorithm using NTP timestamp logic to incorporate a more deterministic time window for our buffer window, such that our 'cutoff' variable that decides the buffer window size in the `pop_up_to` function in `sync.py` is not a random/static given and can dynamically accomodate video frames based on their needs.
+
+Network Time Protocol (NTP) and Precision Time Protocol (PTP) both utilize a client-server or peer-to-peer message and response system that exchanges timestamps a frame is sent, received by the server/peer, and the timestamps that response from the server/peer is sent to the client; this calculates the offset and delay or RTT. We want to incorporate this model (a modified intersection algorithm) by estimating a baseline we can assume the maximum amount of frames can fit in our buffer window as it is sent so that a given frame will not remain and what would be displayed during visual video testing is not a previous frame/the 'past', but more likely to be the current one. Similarly, due to the differences in implementation in our algorithm as well as our sync algorithms compatibility, we've also considered integrating PTP due to its precision time synchronization model, which may be useful to decrease discrepeancies with time compensation.     
 
 ## 7. Integrating Above Measurement Method with IP Cameras
 
