@@ -28,3 +28,13 @@
  - Run 8 rounds, take the median. Then the receiver subtracts that offset from every incmoing `ts_ms` before pushing to `SyncBuffer`, correcting all sender timestamps into receiver-local time. 
  - `transport.py`: calls `server_clock_sync(sock)` after each `sock.connect()`, before frame threads start.
  - `get_frame.py`: calls `measure_offset(conn)` after each `server.accept()`, pass the per-connection offset into `_receive_loop`, apply correction there. 
+
+ # Issue 3: Using TCP over UDP
+
+ > - If we decide to use UDP instead, the whole Socket API connection model would disappear. This means the receiver wouldn't know a sender exists until a datagram arrives, and has no way to know when a sender leaves. Additionally, UDP means we either get the whole packet or we don't. 
+ > - Another problem is that Ethernet MTU is 1500 bytes while a typical JPEG frame at quality 90 is 30-150 KB. A single `sendto()` call with a 100KB payload either gets fragmented by the IP layer into about 70 fragments, any one of which being dropped silently drops the whole frame with no retransmission, or gets rejected with the max-size depending on the OS. 
+ > - We would need to implement application-layer fragmentation to split each JPEG into chunks, add a sequence number and fragment index to each chunk's header, reassemble on the receiver, which, I think, is a reimplementation of what TCP already does. 
+ > - Our system already handles out-of order delivery by the `_StreamBuffer` min-heap in `sync.py` by sorting frames on `ts_ms`
+
+ > So, the only thing UPD buys us is the absence of head-of-line blocking, which we already solved by giving each camera its own TCP connection. The fragmentation problem alone makes UDP a poor fit for JPEG payloads, unless we have to write a reassembly layer, at which point we'd have rebuilt most of what TCP gives us for free. 
+
