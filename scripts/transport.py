@@ -40,17 +40,18 @@ def make_packet(jpeg_bytes: bytes, ts_ms: int, cam_id: int) -> bytes:
     return header + jpeg_bytes
 
 
-def send_frames(
-    cameras: list,
+def send_camera_frames(
+    cam: single_cam.CameraSource,
+    cam_id: int,
     sock: socket.socket,
     jpeg_quality: int,
     base_delay_ms: float = 0.0,
     jitter_ms: float = 0.0,
 ) -> None:
-    """Read the latest frame from each camera and send over the TCP socket.
+    """Send frames for a single camera over its own dedicated socket.
 
-    Deduplicates by ts_ms so the same captured frame is never sent twice,
-    even if the send loop runs faster than the camera's frame rate.
+    Each camera runs this function in its own thread, so cameras never
+    block each other during encoding or network I/O.
 
     Args:
         base_delay_ms: Fixed artificial delay added before each packet send (ms).
@@ -58,27 +59,22 @@ def send_frames(
                        Actual per-packet delay = base_delay + uniform(-jitter, +jitter),
                        clamped to >= 0.
     """
-    last_ts = {id(cam): -1 for cam in cameras}
-
-    while any(cam.running for cam in cameras):
-        for cam_id, cam in enumerate(cameras):
-            frame, ts_ms = cam.get_frame()
-            if frame is None or ts_ms == last_ts[id(cam)]:
-                continue
-            try:
-                jpeg = encode_jpeg(frame, jpeg_quality)
-                if base_delay_ms > 0 or jitter_ms > 0:
-                    delay_s = (base_delay_ms + random.uniform(-jitter_ms, jitter_ms)) / 1000.0
-                    time.sleep(max(0.0, delay_s))
-                sock.sendall(make_packet(jpeg, ts_ms, cam_id))
-                last_ts[id(cam)] = ts_ms
-            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-                print(f"[ERROR] Connection lost: {exc}")
-                for c in cameras:
-                    c.running = False
-                return
-            
-    print(last_ts)  # Debug: print last sent timestamps for each camera
+    last_ts = -1
+    while cam.running:
+        frame, ts_ms = cam.get_frame()
+        if frame is None or ts_ms == last_ts:
+            continue
+        try:
+            jpeg = encode_jpeg(frame, jpeg_quality)
+            if base_delay_ms > 0 or jitter_ms > 0:
+                delay_s = (base_delay_ms + random.uniform(-jitter_ms, jitter_ms)) / 1000.0
+                time.sleep(max(0.0, delay_s))
+            sock.sendall(make_packet(jpeg, ts_ms, cam_id))
+            last_ts = ts_ms
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            print(f"[ERROR] cam {cam_id} connection lost: {exc}")
+            cam.running = False
+            return
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Multi-cam TCP transport sender")
@@ -128,14 +124,24 @@ def main():
     ]
     print(f"[INFO] Opened {len(cameras)} camera(s).")
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((args.host, args.port))
-    print(f"[INFO] Connected to {args.host}:{args.port}")
+    # One independent socket per camera so encoding/sending never blocks across cameras.
+    sockets = []
+    for cam_id in range(len(cameras)):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.connect((args.host, args.port))
+        print(f"[INFO] cam {cam_id} connected to {args.host}:{args.port}")
+        sockets.append(sock)
 
     try:
-        with ThreadPoolExecutor(max_workers=len(cameras)) as executor:
-            futures = {executor.submit(capture_loop, cam): cam for cam in cameras}
-            send_frames(cameras, sock, args.jpeg_quality, args.base_delay_ms, args.jitter_ms)
+        with ThreadPoolExecutor(max_workers=len(cameras) * 2) as executor:
+            futures = [executor.submit(capture_loop, cam) for cam in cameras]
+            futures += [
+                executor.submit(
+                    send_camera_frames, cam, cam_id, sock,
+                    args.jpeg_quality, args.base_delay_ms, args.jitter_ms,
+                )
+                for cam_id, (cam, sock) in enumerate(zip(cameras, sockets))
+            ]
             for future in as_completed(futures):
                 future.result()
     except KeyboardInterrupt:
@@ -144,8 +150,9 @@ def main():
         for cam in cameras:
             cam.running = False
             cam.release()
-        sock.close()
-        print("[INFO] All cameras released, socket closed.")
+        for sock in sockets:
+            sock.close()
+        print("[INFO] All cameras released, sockets closed.")
 
 
 if __name__ == "__main__":

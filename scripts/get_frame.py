@@ -110,16 +110,19 @@ def parse_args():
     return parser.parse_args()
 
 
-def create_server(host: str, port: int):
-    """Bind a TCP server socket, accept one connection, and return both."""
+def create_server(host: str, port: int, num_cameras: int):
+    """Bind a TCP server socket, accept one connection per camera, and return all."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
-    server.listen(1)
-    print(f"[INFO] Listening on {host}:{port} ...")
-    conn, addr = server.accept()
-    print(f"[INFO] Connection from {addr}")
-    return server, conn
+    server.listen(num_cameras)
+    print(f"[INFO] Listening on {host}:{port}, waiting for {num_cameras} camera connection(s)...")
+    connections = []
+    for i in range(num_cameras):
+        conn, addr = server.accept()
+        print(f"[INFO] Connection {i + 1}/{num_cameras} from {addr}")
+        connections.append(conn)
+    return server, connections
 
 
 def create_sync_buffer(args):
@@ -220,14 +223,16 @@ def run_simple_display(latest_frames: dict, frame_lock: threading.Lock, frame_co
 
 def main():
     args = parse_args()
-    server, conn = create_server(args.host, args.port)
+    num_cameras = len(args.stream_ids)
+    server, connections = create_server(args.host, args.port, num_cameras)
     sync_buf = create_sync_buffer(args)
 
     stop_event = threading.Event()
     latest_frames: dict = {}
     frame_lock = threading.Lock()
-    frame_counter = [0]  # mutable int for the receive thread
-    start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter)
+    frame_counter = [0]  # mutable int shared across receive threads
+    for conn in connections:
+        start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter)
 
     frame_interval = 1.0 / args.fps
     try:
@@ -241,7 +246,8 @@ def main():
         stop_event.set()
         if sync_buf:
             sync_buf.close()
-        conn.close()
+        for conn in connections:
+            conn.close()
         server.close()
         cv2.destroyAllWindows()
 
