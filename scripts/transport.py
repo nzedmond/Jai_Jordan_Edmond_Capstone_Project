@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import cv2
 
+import clock_sync
 import single_cam
 from multicam_handler import capture_loop
 
@@ -129,7 +130,8 @@ def main():
     for cam_id in range(len(cameras)):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((args.host, args.port))
-        print(f"[INFO] cam {cam_id} connected to {args.host}:{args.port}")
+        clock_sync.serve_clock_sync(sock)
+        print(f"[INFO] cam {cam_id} connected and clock-synced to {args.host}:{args.port}")
         sockets.append(sock)
 
     try:

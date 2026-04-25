@@ -20,3 +20,11 @@
 > - 1. `Rely on NTP`: ensure both machines sync to the same NTP server. Typical accuracy on this method is 10-50 ms on a LAN and requires nothing in code.
 > - 2. `Application layer clock offset estimation`: before thesession starts, the receiver sends a ping to each sender, measures RTT, and estimate the clock offset (similar to how NTP works but between the two machines directly). This can get to 1-5 ms of accuracy. 
 > - 3. `PTP (IEEE 1588)`: harware-assisted, sub-millisecond accuracy, but requires OS/hardware support.
+
+> we're going with the second approach. We add a new script, `clock_sync.py`, the NTP-style handshake module. 
+ - The receiver sends N pings (each carrying `T1`, its own clock). 
+ - The sender echoes back `(T1, T2, T3)`, where `T2/T3` bracket the sender's prcessing time.
+ - The receiver records `T4` on arrival. The standard NTP formula gives `offset = ((T2-T1) + (T3-T4)) / 2`, which is the sender's clock lead over the receiver's.
+ - Run 8 rounds, take the median. Then the receiver subtracts that offset from every incmoing `ts_ms` before pushing to `SyncBuffer`, correcting all sender timestamps into receiver-local time. 
+ - `transport.py`: calls `server_clock_sync(sock)` after each `sock.connect()`, before frame threads start.
+ - `get_frame.py`: calls `measure_offset(conn)` after each `server.accept()`, pass the per-connection offset into `_receive_loop`, apply correction there. 

@@ -7,6 +7,8 @@ import time
 import cv2
 import numpy as np
 
+import clock_sync
+
 '''Usage:
 1. (simple display, single or multi-cam):
     python get_frame.py --port 9000
@@ -44,8 +46,13 @@ def _receive_loop(
     lock: threading.Lock,
     stop: threading.Event,
     frame_counter: list,
+    offset_ms: int = 0,
 ) -> None:
-    """Background thread: read packets and push into sync_buf or latest_frames."""
+    """Background thread: read packets and push into sync_buf or latest_frames.
+
+    offset_ms is subtracted from every incoming timestamp to convert sender
+    clock readings into receiver-local time before any sync comparisons.
+    """
     while not stop.is_set():
         try:
             header = recv_exact(conn, HEADER_SIZE)
@@ -63,8 +70,10 @@ def _receive_loop(
             print(f"[WARN] cam {cam_id} ts={ts_ms}: JPEG decode failed, skipping.")
             continue
 
+        corrected_ts = ts_ms - offset_ms
+
         if sync_buf is not None:
-            sync_buf.push(cam_id, ts_ms, frame)
+            sync_buf.push(cam_id, corrected_ts, frame)
         else:
             with lock:
                 latest_frames[cam_id] = frame
@@ -111,18 +120,22 @@ def parse_args():
 
 
 def create_server(host: str, port: int, num_cameras: int):
-    """Bind a TCP server socket, accept one connection per camera, and return all."""
+    """Bind a TCP server socket, accept one connection per camera, run the
+    clock-sync handshake on each, and return the server, connections, and
+    per-connection clock offsets."""
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
     server.listen(num_cameras)
     print(f"[INFO] Listening on {host}:{port}, waiting for {num_cameras} camera connection(s)...")
-    connections = []
+    connections, offsets = [], []
     for i in range(num_cameras):
         conn, addr = server.accept()
-        print(f"[INFO] Connection {i + 1}/{num_cameras} from {addr}")
+        offset_ms = clock_sync.measure_offset(conn)
+        print(f"[INFO] Connection {i + 1}/{num_cameras} from {addr}  clock_offset={offset_ms:+d}ms")
         connections.append(conn)
-    return server, connections
+        offsets.append(offset_ms)
+    return server, connections, offsets
 
 
 def create_sync_buffer(args):
@@ -145,11 +158,11 @@ def create_sync_buffer(args):
     return sync_buf
 
 
-def start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter):
+def start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter, offset_ms=0):
     """Spawn the background receive thread and return it."""
     t = threading.Thread(
         target=_receive_loop,
-        args=(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter),
+        args=(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter, offset_ms),
         daemon=True,
     )
     t.start()
@@ -224,15 +237,15 @@ def run_simple_display(latest_frames: dict, frame_lock: threading.Lock, frame_co
 def main():
     args = parse_args()
     num_cameras = len(args.stream_ids)
-    server, connections = create_server(args.host, args.port, num_cameras)
+    server, connections, offsets = create_server(args.host, args.port, num_cameras)
     sync_buf = create_sync_buffer(args)
 
     stop_event = threading.Event()
     latest_frames: dict = {}
     frame_lock = threading.Lock()
     frame_counter = [0]  # mutable int shared across receive threads
-    for conn in connections:
-        start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter)
+    for conn, offset_ms in zip(connections, offsets):
+        start_receive_thread(conn, sync_buf, latest_frames, frame_lock, stop_event, frame_counter, offset_ms)
 
     frame_interval = 1.0 / args.fps
     try:
