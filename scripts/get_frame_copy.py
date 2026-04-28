@@ -19,16 +19,17 @@ import numpy as np
     python get_frame.py --port 9000 --sync --buffer-delay-ms 0   --csv logs/no_buf.csv
     python get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv'''
 
-# Must match transport.py exactly.
-# Header layout (13 bytes, big-endian):
-#   [0:1]  uint8   camera source ID
-#   [1:9]  uint64  capture timestamp in milliseconds
-#   [9:13] uint32  JPEG payload length in bytes
-HEADER_FMT = ">BQI"
-HEADER_SIZE = struct.calcsize(HEADER_FMT)  # 13
-# UDP datagrams are capped at 65507 bytes (65535 - IP/UDP headers).
-# Keep --jpeg-quality low enough that encoded frames stay under this limit.
-MAX_DGRAM = 65507
+# Must match transport_udp.py exactly.
+# Header layout (19 bytes, big-endian):
+#   [0:1]   uint8   cam_id
+#   [1:9]   uint64  capture timestamp ms
+#   [9:13]  uint32  frame_seq
+#   [13:15] uint16  chunk_idx
+#   [15:17] uint16  total_chunks
+#   [17:19] uint16  payload_len
+UDP_HEADER_FMT = ">BQIHHH"
+UDP_HEADER_SIZE = struct.calcsize(UDP_HEADER_FMT)  # 19
+MAX_DGRAM = 1500  # matches sender's MAX_DGRAM_SIZE
 
 
 def _receive_loop(
@@ -39,7 +40,10 @@ def _receive_loop(
     stop: threading.Event,
     frame_counter: list,
 ) -> None:
-    """Background thread: read UDP datagrams and push into sync_buf or latest_frames."""
+    """Background thread: reassemble chunked UDP datagrams and push complete frames."""
+    # {(cam_id, frame_seq): {'chunks': {chunk_idx: bytes}, 'total': int, 'ts_ms': int}}
+    buffer: dict = {}
+
     while not stop.is_set():
         try:
             data, _ = sock.recvfrom(MAX_DGRAM)
@@ -48,13 +52,24 @@ def _receive_loop(
                 return
             raise
 
-        if len(data) < HEADER_SIZE:
+        if len(data) < UDP_HEADER_SIZE:
             continue
-        cam_id, ts_ms, length = struct.unpack(HEADER_FMT, data[:HEADER_SIZE])
-        jpeg_bytes = data[HEADER_SIZE:HEADER_SIZE + length]
-        if len(jpeg_bytes) < length:
-            print(f"[WARN] cam {cam_id} ts={ts_ms}: truncated datagram, skipping.")
-            continue
+
+        cam_id, ts_ms, frame_seq, chunk_idx, total_chunks, payload_len = struct.unpack(
+            UDP_HEADER_FMT, data[:UDP_HEADER_SIZE]
+        )
+        payload = data[UDP_HEADER_SIZE:UDP_HEADER_SIZE + payload_len]
+
+        key = (cam_id, frame_seq)
+        if key not in buffer:
+            buffer[key] = {'chunks': {}, 'total': total_chunks, 'ts_ms': ts_ms}
+        buffer[key]['chunks'][chunk_idx] = payload
+
+        if len(buffer[key]['chunks']) < total_chunks:
+            continue  # still waiting for remaining chunks
+
+        entry = buffer.pop(key)
+        jpeg_bytes = b''.join(entry['chunks'][i] for i in range(total_chunks))
 
         frame = cv2.imdecode(
             np.frombuffer(jpeg_bytes, dtype=np.uint8), cv2.IMREAD_COLOR
