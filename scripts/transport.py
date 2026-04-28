@@ -21,6 +21,8 @@ from multicam_handler import capture_loop
     python transport.py --sources 0 1 --host 0.0.0.0 --port 9000 --base-delay-ms 50 --jitter-ms 10
 3. adjust JPEG quality (tradeoff between latency and image quality):
     python transport.py --sources 0 1 --host 192.168.1.10 --port 9000 --jpeg-quality 85
+4. simulate jitter bursts (test transport delay effects):
+    python transport.py --sources 0 1 --host 0.0.0.0 --port 9000 --base-delay-ms 50 --jitter-ms 10 --burst-prob 0.05 --burst-duration 10
  '''
 
 
@@ -78,16 +80,24 @@ def send_camera_frames(
     jpeg_quality: int,
     base_delay_ms: float = 0.0,
     jitter_ms: float = 0.0,
+    burst_prob: float = 0.05,
+    burst_duration: float = 10.0,
 ) -> None:
     """Encode frames and schedule them for delivery at the correct simulated arrival time.
 
     Each packet's delivery time is computed independently as:
-        deliver_at = time.time() + base_delay_ms + uniform(-jitter_ms, +jitter_ms)
+        deliver_at = time.time() + base_delay_ms + jitter_sample
+
+    where jitter_sample comes from a two-state Markov chain:
+      - Normal state: jitter_sample = 0
+      - Burst state:  jitter_sample = uniform(0, jitter_ms)
+      - Normal -> Burst: probability burst_prob per packet
+      - Burst  -> Normal: probability 1/burst_duration per packet
+        (so expected burst length = burst_duration packets)
 
     Packets are placed in a priority queue sorted by deliver_at, so a packet
     with a shorter delay overtakes one with a longer delay — simulating true
-    end-to-end network latency and out-of-order arrival rather than just
-    varying inter-packet transmission gaps.
+    end-to-end network latency and out-of-order arrival.
     """
     deliver_queue: queue.PriorityQueue = queue.PriorityQueue()
     seq = itertools.count()
@@ -99,6 +109,7 @@ def send_camera_frames(
     )
     delivery_t.start()
 
+    in_burst = False
     last_ts = -1
     try:
         while cam.running:
@@ -110,7 +121,20 @@ def send_camera_frames(
             except RuntimeError as exc:
                 print(f"[WARN] cam {cam_id} encode failed: {exc}")
                 continue
-            jitter = random.uniform(-jitter_ms, jitter_ms) if jitter_ms > 0 else 0.0
+
+            # Two-state Markov jitter
+            if jitter_ms > 0:
+                if in_burst:
+                    jitter = random.uniform(0, jitter_ms)
+                    if random.random() < 1.0 / burst_duration:
+                        in_burst = False
+                else:
+                    jitter = 0.0
+                    if random.random() < burst_prob:
+                        in_burst = True
+            else:
+                jitter = 0.0
+
             delay_s = max(0.0, (base_delay_ms + jitter) / 1000.0)
             deliver_queue.put((time.time() + delay_s, next(seq), make_packet(jpeg, ts_ms, cam_id)))
             last_ts = ts_ms
@@ -154,8 +178,24 @@ def parse_args():
         type=float,
         default=0.0,
         metavar="MS",
-        help="Uniform jitter half-range in ms added on top of base-delay-ms (default: 0). "
-             "Each packet's total delay = base_delay + uniform(-jitter, +jitter), clamped >= 0.",
+        help="Maximum extra delay in ms added during a jitter burst (default: 0). "
+             "During a burst each packet gets uniform(0, jitter_ms) added on top of base-delay-ms.",
+    )
+    parser.add_argument(
+        "--burst-prob",
+        type=float,
+        default=0.05,
+        metavar="P",
+        help="Probability per packet of entering a jitter burst (default: 0.05). "
+             "Only has effect when --jitter-ms > 0.",
+    )
+    parser.add_argument(
+        "--burst-duration",
+        type=float,
+        default=10.0,
+        metavar="N",
+        help="Expected number of packets in a jitter burst (default: 10). "
+             "Exit probability per packet = 1 / burst-duration.",
     )
     parser.add_argument(
         "--cam-id-start",
@@ -193,6 +233,7 @@ def main():
                 executor.submit(
                     send_camera_frames, cam, args.cam_id_start + idx, sock,
                     args.jpeg_quality, args.base_delay_ms, args.jitter_ms,
+                    args.burst_prob, args.burst_duration,
                 )
                 for idx, (cam, sock) in enumerate(zip(cameras, sockets))
             ]
