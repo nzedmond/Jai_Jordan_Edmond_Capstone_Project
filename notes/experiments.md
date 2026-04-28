@@ -1,6 +1,6 @@
-# What other studies tell you about testing
+# What other studies say
 
-> LSync reports a single headline number - 24.84 ms average sync precision, measured by embedding a known timing signal into the content, then measuring detection error at the receiver. This means that LSync can measure error independently of the system under test. 
+> LSync reports a single headline number, 24.84 ms average sync precision, measured by embedding a known timing signal into the content, then measuring detection error at the receiver. This means that LSync can measure error independently of the system under test. 
 
 > PTP uses hardware NIC timestamp as ground truth, which we don't use in our algorithm. 
 
