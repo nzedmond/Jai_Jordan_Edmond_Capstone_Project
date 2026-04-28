@@ -133,6 +133,52 @@ def plot_latency_histogram(dfs: list, labels: list, out_dir: Path, show: bool) -
 
 
 # ---------------------------------------------------------------------------
+# Plot 4 — Phase 1 box plot
+# ---------------------------------------------------------------------------
+
+def plot_phase1_boxplot(dfs: list, labels: list, out_dir: Path, show: bool,
+                        phase1_threshold_ms: int = 500) -> None:
+    """Box-and-whisker plot of sync error for Phase 1 frames only.
+
+    Phase 1 is approximated as all frames with sync_error_ms <= phase1_threshold_ms,
+    which excludes the Phase 2 frozen-frame tail without requiring manual frame boundaries.
+    """
+    phase1_data = []
+    for df in dfs:
+        vals = df.loc[df["sync_error_ms"] <= phase1_threshold_ms, "sync_error_ms"].values
+        phase1_data.append(vals)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    bp = ax.boxplot(phase1_data, labels=labels, patch_artist=True, notch=False)
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for patch, color in zip(bp["boxes"], colors):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+
+    ax.set_xlabel("Buffer depth (run)")
+    ax.set_ylabel("Sync error (ms)")
+    ax.set_title(
+        f"Phase 1 sync error distribution\n"
+        f"(frames with sync error ≤ {phase1_threshold_ms} ms)"
+    )
+    ax.grid(True, alpha=0.3, axis="y")
+
+    # Annotate median value above each box
+    for i, vals in enumerate(phase1_data, start=1):
+        med = float(np.median(vals))
+        ax.text(i, med + 2, f"{med:.0f} ms", ha="center", va="bottom", fontsize=8)
+
+    fig.tight_layout()
+    out_path = out_dir / "phase1_boxplot.png"
+    fig.savefig(out_path, dpi=150)
+    print(f"[INFO] Saved {out_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Summary table
 # ---------------------------------------------------------------------------
 
@@ -196,6 +242,7 @@ def main():
     plot_sync_error(dfs, labels, out_dir, show)
     plot_sync_error_cdf(dfs, labels, out_dir, show)
     plot_latency_histogram(dfs, labels, out_dir, show)
+    plot_phase1_boxplot(dfs, labels, out_dir, show)
 
 
 if __name__ == "__main__":

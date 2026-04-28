@@ -34,20 +34,47 @@ import numpy as np
 # Internal per-stream buffer
 # ---------------------------------------------------------------------------
 
+_EMA_ALPHA = 0.1          # smoothing factor for frame-interval Exponential Moving Average (EMA)
+_MIN_INTERVAL_MS = 5.0    # clamp: faster than 200 fps is noise
+_MAX_INTERVAL_MS = 500.0  # clamp: slower than 2 fps is a stall, not the capture rate
+
+
 class _StreamBuffer:
     """Min-heap of (ts_ms, seq, frame) for one camera stream.
 
     A monotonic sequence counter is used as a tie-breaker so that
     numpy arrays are never compared directly.
+
+    Also tracks an EMA estimate of the stream's native frame interval so
+    that SyncBuffer.try_consume() can rate-limit faster streams to the
+    pace of the slowest stream.
     """
 
     def __init__(self) -> None:
         self._heap: list = []
         self._counter = itertools.count()
         self.last: Optional[Tuple[int, np.ndarray]] = None  # (ts_ms, frame)
+        self._last_push_ts: Optional[int] = None
+        self._est_interval_ms: Optional[float] = None
 
     def push(self, ts_ms: int, frame: np.ndarray) -> None:
+        if self._last_push_ts is not None:
+            interval = ts_ms - self._last_push_ts
+            if _MIN_INTERVAL_MS <= interval <= _MAX_INTERVAL_MS:
+                if self._est_interval_ms is None:
+                    self._est_interval_ms = float(interval)
+                else:
+                    self._est_interval_ms = (
+                        _EMA_ALPHA * interval
+                        + (1.0 - _EMA_ALPHA) * self._est_interval_ms
+                    )
+        self._last_push_ts = ts_ms
         heapq.heappush(self._heap, (ts_ms, next(self._counter), frame))
+
+    @property
+    def est_interval_ms(self) -> Optional[float]:
+        """EMA estimate of this stream's inter-frame interval (ms), or None if unknown."""
+        return self._est_interval_ms
 
     def peek_ts(self) -> Optional[int]:
         return self._heap[0][0] if self._heap else None
@@ -163,22 +190,45 @@ class SyncBuffer:
         timestamps: Dict[int, int] = {}
 
         with self._lock:
+            # Compute the slowest stream's interval so faster streams are held back.
+            # Only activate rate-limiting once every stream has a valid estimate.
+            intervals = [b.est_interval_ms for b in self._bufs.values()]
+            max_interval_ms: Optional[float] = (
+                max(intervals) if all(iv is not None for iv in intervals) else None
+            )
+
             for sid in self.stream_ids:
                 buf = self._bufs[sid]
-                entry = buf.pop_up_to(cutoff)
 
-                if entry is not None:
-                    ts_ms, frame = entry
-                    buf.last = (ts_ms, frame)
-                    frames[sid] = frame
-                    timestamps[sid] = ts_ms
-                elif buf.last is not None:
-                    # Freeze on last good frame
-                    ts_ms, frame = buf.last
-                    frames[sid] = frame
-                    timestamps[sid] = ts_ms
+                # Rate-limit: advance this stream only when enough time has
+                # elapsed since its last displayed frame to match the slowest
+                # stream's pace.  The 0.8 factor gives a small timing tolerance
+                # so a frame is not systematically skipped by display-loop jitter.
+                advance = True
+                if max_interval_ms is not None and buf.last is not None:
+                    elapsed = cutoff - buf.last[0]
+                    if elapsed < max_interval_ms * 0.8:
+                        advance = False
+
+                if advance:
+                    entry = buf.pop_up_to(cutoff)
+                    if entry is not None:
+                        ts_ms, frame = entry
+                        buf.last = (ts_ms, frame)
+                        frames[sid] = frame
+                        timestamps[sid] = ts_ms
+                    elif buf.last is not None:
+                        # Freeze on last good frame
+                        ts_ms, frame = buf.last
+                        frames[sid] = frame
+                        timestamps[sid] = ts_ms
+                    else:
+                        return None  # Stream has never had a frame — not ready yet
                 else:
-                    return None  # Stream has never had a frame — not ready yet
+                    # Not time to advance yet — reuse the last displayed frame
+                    ts_ms, frame = buf.last  # type: ignore[misc]
+                    frames[sid] = frame
+                    timestamps[sid] = ts_ms
 
         ts_vals = list(timestamps.values())
         sync_error_ms = max(ts_vals) - min(ts_vals)
