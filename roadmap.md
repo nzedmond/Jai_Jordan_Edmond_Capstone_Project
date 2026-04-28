@@ -38,3 +38,31 @@
 
  > So, the only thing UPD buys us is the absence of head-of-line blocking, which we already solved by giving each camera its own TCP connection. The fragmentation problem alone makes UDP a poor fit for JPEG payloads, unless we have to write a reassembly layer, at which point we'd have rebuilt most of what TCP gives us for free. 
 
+ # Issue 4: Same fixed delay for every stream
+ **Old version:** One `send_frames()` loop applied one `--base-delay-ms/--jitter-ms` to all cameras from the same transport.py instance. No way to give streams different conditions.
+
+ **new_version:** Because get_frame.py now accepts N independent connections, you can run two separate transport.py instances with different delay parameters:
+
+ `python transport.py --sources 0 --host 127.0.0.1 --port 9000 --base-delay-ms 20  --jitter-ms 5  --cam-id-start 0`
+
+`python transport.py --sources 1 --host 127.0.0.1 --port 9000 --base-delay-ms 80  --jitter-ms 30 --cam-id-start 1`
+
+# Issue 5: Varying inter-packet transmission time, not end-to-end latency.
+`time.sleep(max(0.0, delay_s))`
+`sock.sendall(make_packet(jpeg, ts_ms, cam_id))` in `trasport.py`
+
+The sleep happens before the send. This delays when the packet leaves the sender, not when it arrives at the receiver. The difference matters: in a real network, the packet departs immediately and the delay is imposed in transit. With a sleep-before-send approach you can never produce out-of-order arrival — packet 2 always departs after packet 1 finishes sleeping. A real 80ms delay on packet 1 and a 20ms delay on packet 2 would cause packet 2 to arrive first (reordering), which is a real phenomenon the jitter buffer's min-heap is actually designed to handle.
+
+  > The proper fix is to move the delay to the receiver side: send packets immediately and sleep in _receive_loop before pushing to the sync buffer. That simulates the packet spending time in the network rather than sitting at the sender.
+
+# Issue 6: Uniform Random jitter vs. bursty jitter
+
+`delay_s = (base_delay_ms + random.uniform(-jitter_ms, jitter_ms)) / 1000.0` in `transport.py`.
+
+Real network jitter is temporally correlated — when a router becomes congested, the next 10–20 packets all experience elevated delay together, then conditions recover. Independent uniform noise per packet produces a smooth distribution that understates how badly a real jitter burst can affect a streaming buffer, and understates how important `buffer_delay_ms` depth really is.
+
+
+
+
+
+

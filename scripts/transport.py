@@ -1,7 +1,10 @@
 import argparse
+import itertools
+import queue
 import random
 import socket
 import struct
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -41,6 +44,33 @@ def make_packet(jpeg_bytes: bytes, ts_ms: int, cam_id: int) -> bytes:
     return header + jpeg_bytes
 
 
+def _delivery_loop(
+    deliver_queue: queue.PriorityQueue,
+    sock: socket.socket,
+    cam_id: int,
+    cam: single_cam.CameraSource,
+) -> None:
+    """Send packets at their scheduled delivery time.
+
+    Runs in a dedicated thread so a packet with a shorter delay can overtake
+    one with a longer delay, matching real network out-of-order arrival.
+    Exits when it dequeues the sentinel (packet_bytes=None).
+    """
+    while True:
+        deliver_at, _seq, packet_bytes = deliver_queue.get()
+        if packet_bytes is None:  # sentinel — all frames have been queued
+            return
+        sleep_s = deliver_at - time.time()
+        if sleep_s > 0:
+            time.sleep(sleep_s)
+        try:
+            sock.sendall(packet_bytes)
+        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+            print(f"[ERROR] cam {cam_id} connection lost: {exc}")
+            cam.running = False
+            return
+
+
 def send_camera_frames(
     cam: single_cam.CameraSource,
     cam_id: int,
@@ -49,33 +79,44 @@ def send_camera_frames(
     base_delay_ms: float = 0.0,
     jitter_ms: float = 0.0,
 ) -> None:
-    """Send frames for a single camera over its own dedicated socket.
+    """Encode frames and schedule them for delivery at the correct simulated arrival time.
 
-    Each camera runs this function in its own thread, so cameras never
-    block each other during encoding or network I/O.
+    Each packet's delivery time is computed independently as:
+        deliver_at = time.time() + base_delay_ms + uniform(-jitter_ms, +jitter_ms)
 
-    Args:
-        base_delay_ms: Fixed artificial delay added before each packet send (ms).
-        jitter_ms:     Uniform jitter half-range added on top of base_delay (ms).
-                       Actual per-packet delay = base_delay + uniform(-jitter, +jitter),
-                       clamped to >= 0.
+    Packets are placed in a priority queue sorted by deliver_at, so a packet
+    with a shorter delay overtakes one with a longer delay — simulating true
+    end-to-end network latency and out-of-order arrival rather than just
+    varying inter-packet transmission gaps.
     """
+    deliver_queue: queue.PriorityQueue = queue.PriorityQueue()
+    seq = itertools.count()
+
+    delivery_t = threading.Thread(
+        target=_delivery_loop,
+        args=(deliver_queue, sock, cam_id, cam),
+        daemon=True,
+    )
+    delivery_t.start()
+
     last_ts = -1
-    while cam.running:
-        frame, ts_ms = cam.get_frame()
-        if frame is None or ts_ms == last_ts:
-            continue
-        try:
-            jpeg = encode_jpeg(frame, jpeg_quality)
-            if base_delay_ms > 0 or jitter_ms > 0:
-                delay_s = (base_delay_ms + random.uniform(-jitter_ms, jitter_ms)) / 1000.0
-                time.sleep(max(0.0, delay_s))
-            sock.sendall(make_packet(jpeg, ts_ms, cam_id))
+    try:
+        while cam.running:
+            frame, ts_ms = cam.get_frame()
+            if frame is None or ts_ms == last_ts:
+                continue
+            try:
+                jpeg = encode_jpeg(frame, jpeg_quality)
+            except RuntimeError as exc:
+                print(f"[WARN] cam {cam_id} encode failed: {exc}")
+                continue
+            jitter = random.uniform(-jitter_ms, jitter_ms) if jitter_ms > 0 else 0.0
+            delay_s = max(0.0, (base_delay_ms + jitter) / 1000.0)
+            deliver_queue.put((time.time() + delay_s, next(seq), make_packet(jpeg, ts_ms, cam_id)))
             last_ts = ts_ms
-        except (BrokenPipeError, ConnectionResetError, OSError) as exc:
-            print(f"[ERROR] cam {cam_id} connection lost: {exc}")
-            cam.running = False
-            return
+    finally:
+        deliver_queue.put((float("inf"), next(seq), None))  # sentinel, always dequeued last
+        delivery_t.join()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Multi-cam TCP transport sender")
@@ -105,14 +146,16 @@ def parse_args():
         type=float,
         default=0.0,
         metavar="MS",
-        help="Fixed artificial network delay per packet in ms (default: 0)",
+        help="Simulated end-to-end network latency in ms: each packet is delivered "
+             "base_delay_ms after it is captured (default: 0)",
     )
     parser.add_argument(
         "--jitter-ms",
         type=float,
         default=0.0,
         metavar="MS",
-        help="Uniform jitter half-range per packet in ms (default: 0)",
+        help="Uniform jitter half-range in ms added on top of base-delay-ms (default: 0). "
+             "Each packet's total delay = base_delay + uniform(-jitter, +jitter), clamped >= 0.",
     )
     parser.add_argument(
         "--cam-id-start",
