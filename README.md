@@ -32,6 +32,7 @@ scripts/
     multicam_handler.py  # Multi-camera local display in a grid layout
     transport.py         # TCP sender: captures frames, encodes JPEG, sends with header
     get_frame.py         # TCP receiver: parses header, decodes JPEG, displays frames
+    clock_sync.py        # NTP-style clock offset estimation (runs before frame streaming)
     sync.py              # SyncBuffer — jitter-buffer synchronizer for multi-stream alignment
     analyze_sync.py      # Reads experiment CSVs and produces sync error / latency plots
     figures/
@@ -86,23 +87,35 @@ python multicam_handler.py --sources 0 1 --timestamp-format epoch_ms
 
 ### `transport.py` + `get_frame.py` — TCP streaming pipeline
 
-Each frame is sent as:
+Each frame is sent as a 13-byte header followed by JPEG data:
 ```
-[  8 bytes  ] uint64  capture timestamp (ms, big-endian)
-[  4 bytes  ] uint32  JPEG payload length (big-endian)
+[  1 byte   ] uint8   camera ID
+[  8 bytes  ] uint64  capture timestamp in milliseconds (big-endian)
+[  4 bytes  ] uint32  JPEG payload length in bytes (big-endian)
 [  N bytes  ] JPEG frame data
 ```
 
-**Terminal 1 — start the receiver first:**
+Before any frames are sent, each sender and receiver exchange a clock-sync handshake (see `clock_sync.py`) to estimate and correct the clock offset between machines. Each camera gets its own dedicated TCP connection, so slow encoding or network congestion on one camera never delays another.
+
+**Single-machine usage (two sources on one sender):**
 ```bash
-python get_frame.py --port 9000
+# Terminal 1 — receiver
+python get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
+
+# Terminal 2 — sender with two sources
+python transport.py --sources ../videos/test_01.mp4 ../videos/test_02.mp4 --host 127.0.0.1 --port 9000
 ```
 
-**Terminal 2 — start the sender:**
+**Distributed usage (one camera per machine):**
 ```bash
-python transport.py --sources ../videos/test_01.mp4 --host 127.0.0.1 --port 9000
-# multiple sources:
-python transport.py --sources 0 1 --host 127.0.0.1 --port 9000 --jpeg-quality 85
+# Mac Mini (receiver)
+python get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
+
+# Machine A — camera 0  (connect first)
+python transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
+
+# Machine B — camera 1  (connect second)
+python transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
 ```
 
 `transport.py` flags:
@@ -110,8 +123,9 @@ python transport.py --sources 0 1 --host 127.0.0.1 --port 9000 --jpeg-quality 85
 | Flag | Default | Description |
 |---|---|---|
 | `--sources` | required | Camera sources (device index, file path, or RTSP URL) |
-| `--host` | required | Receiver host |
+| `--host` | required | Receiver host IP |
 | `--port` | required | Receiver port |
+| `--cam-id-start` | `0` | First camera ID assigned to this sender's sources. Set to `1` on the second machine in a distributed setup so streams have distinct IDs. |
 | `--timestamp-format` | `iso` | `iso` (ISO 8601 ms) or `epoch_ms` (Unix ms) |
 | `--jpeg-quality` | `90` | JPEG encoding quality (1–100) |
 | `--base-delay-ms` | `0` | Fixed artificial delay per packet in ms (simulates network latency) |
@@ -123,11 +137,11 @@ python transport.py --sources 0 1 --host 127.0.0.1 --port 9000 --jpeg-quality 85
 |---|---|---|
 | `--port` | required | Port to listen on |
 | `--host` | `0.0.0.0` | Bind address |
-| `--sync` | off | Enable jitter-buffer synchronization (requires two camera streams) |
+| `--sync` | off | Enable jitter-buffer synchronization |
 | `--buffer-delay-ms` | `100` | Jitter buffer depth in ms — larger values reduce sync error at the cost of latency |
 | `--fps` | `30.0` | Target playback frame rate |
 | `--csv` | none | Path to write per-frame sync metrics CSV (only used with `--sync`) |
-| `--stream-ids` | `0 1` | Camera IDs to synchronize |
+| `--stream-ids` | `0 1` | Camera IDs to expect. Also controls how many TCP connections the receiver waits for before starting. |
 
 Press `q` in the display window or `Ctrl+C` in either terminal to shut down cleanly.
 
@@ -186,45 +200,91 @@ Python 3.10+ recommended. All other dependencies (`socket`, `struct`, `threading
 
 
 ## RUNNING MEASUREMENTS WITH PRERECORDED VIDEOS
+
+Both video files are passed to a single `transport.py` instance on the same machine. The receiver waits for two connections (one per source), runs the clock-sync handshake on each (offset will be ~0ms since both originate from the same clock), then begins the jitter-buffer experiment.
+
 - **Experiment 01: no buffer**
 ```bash
-terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 0 --csv logs/no_buf.csv`
-terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+# Terminal 1
+python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 0 --csv logs/no_buf.csv
+
+# Terminal 2
+python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
 ```
 
 - **Experiment 02: buffer = 100ms**
 ```bash
-terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/buf100.csv`
-terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+# Terminal 1
+python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/buf100.csv
+
+# Terminal 2
+python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
 ```
 
 - **Experiment 03: buffer = 300ms**
 ```bash
-terminal 1: `python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv`
-terminal 2: `python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30`
+# Terminal 1
+python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv
+
+# Terminal 2
+python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
 ```
 
-- **After all the three experiments, analyze them together by running:**
+- **Analyze all three experiments together:**
 ```bash
-`python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv`
+python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv
 ```
+
+---
+
+## RUNNING WITH DISTRIBUTED CAMERAS (multi-machine)
+
+This is the primary scenario the clock-sync handshake is designed for. Each camera source runs `transport.py` on its own machine. The receiver waits for all expected connections before starting.
+
+**Start the receiver first (Mac Mini or any designated server):**
+```bash
+python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/distributed_run.csv
+```
+
+**Then start each sender (one per machine, in order):**
+```bash
+# Machine A — cam 0 (connect first)
+python scripts/transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
+
+# Machine B — cam 1 (connect second)
+python scripts/transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
+```
+
+The receiver will print the estimated clock offset for each incoming connection before frame streaming begins, e.g.:
+```
+[INFO] Connection 1/2 from ('192.168.1.5', 52341)  clock_offset=+23ms
+[INFO] Connection 2/2 from ('192.168.1.8', 49012)  clock_offset=-11ms
+```
+
+All incoming timestamps are corrected by their respective offsets before entering the jitter buffer, so `sync_error_ms` in the CSV reflects true capture-time differences rather than inter-machine clock skew.
+
+---
 
 ## RUNNING WITH IP CAM
 
-For this experiment, we used a tapo C211 WiFi camera. This camera works with rtsp after a quick setup within the tapo app. Because the Colgate WiFi does not support this kind of device to device communication, we had to set up a local ad-hoc network using a Macbook as the "router", which the camera would connect to. The camera was set to have a static IP within the tapo app.
+For this experiment we used a Tapo C211 WiFi camera alongside the built-in MacBook webcam, both fed into a single `transport.py` instance on the Mac. Because Colgate WiFi does not support direct device-to-device communication, we set up a local ad-hoc network using the MacBook as a router and assigned the camera a static IP in the Tapo app.
 
-The general formula for an rtsp cam url is rtsp://USERNAME:PASSWORD@IP_address:PORT/path
+RTSP URL format: `rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT/stream1`
 
-To test our camera connection, we directly displayed the IP camera video by running:
+To verify the camera connection before running the full pipeline:
 ```bash
-python capture.py --sources rtsp://jshapiro@colgate.edu:Orlando0@192.168.2.4:554/stream1 
+python scripts/capture.py --source rtsp://USERNAME:PASSWORD@192.168.2.4:554/stream1
 ```
 
-Then, the command with `transport.py` was run like below to connect to the camera:
+To run the full sync experiment (webcam as cam 0, IP cam as cam 1, both on the same Mac):
 ```bash
-python3 scripts/transport.py --sources 1 rtsp://jshapiro@colgate.edu:Orlando0@192.168.2.4:554/stream1 --host 0.0.0.0 --port 9000
+# Terminal 1 — receiver
+python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/ipcam_run.csv
+
+# Terminal 2 — sender (both sources on the same machine)
+python scripts/transport.py --sources 0 rtsp://USERNAME:PASSWORD@192.168.2.4:554/stream1 --host 127.0.0.1 --port 9000
 ```
 
-Here, source 1 is the native Macbook webcam, and the rtsp url is used to connect to the WiFi cam. We ran the same three experiments and analysis above comparing the built-in Macbook webcam to the tapo cam broadcasting over the network.
+We ran the same three buffer-depth experiments and analysis as above, comparing the built-in webcam (30 fps) to the Tapo cam (15 fps). The framerate mismatch caused the jitter buffer to freeze on the slower stream's last frame more frequently — a known limitation documented in `results_report.md`.
 
 
