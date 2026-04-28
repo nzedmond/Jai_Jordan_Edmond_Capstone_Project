@@ -114,6 +114,14 @@ def parse_args():
         metavar="MS",
         help="Uniform jitter half-range per packet in ms (default: 0)",
     )
+    parser.add_argument(
+        "--cam-id-start",
+        type=int,
+        default=0,
+        metavar="N",
+        help="First camera ID to use when labeling streams (default: 0). "
+             "Set to 1 on the second machine so its stream is cam_id=1.",
+    )
     return parser.parse_args()
 
 
@@ -127,7 +135,8 @@ def main():
 
     # One independent socket per camera so encoding/sending never blocks across cameras.
     sockets = []
-    for cam_id in range(len(cameras)):
+    for idx in range(len(cameras)):
+        cam_id = args.cam_id_start + idx
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.connect((args.host, args.port))
         clock_sync.serve_clock_sync(sock)
@@ -139,10 +148,10 @@ def main():
             futures = [executor.submit(capture_loop, cam) for cam in cameras]
             futures += [
                 executor.submit(
-                    send_camera_frames, cam, cam_id, sock,
+                    send_camera_frames, cam, args.cam_id_start + idx, sock,
                     args.jpeg_quality, args.base_delay_ms, args.jitter_ms,
                 )
-                for cam_id, (cam, sock) in enumerate(zip(cameras, sockets))
+                for idx, (cam, sock) in enumerate(zip(cameras, sockets))
             ]
             for future in as_completed(futures):
                 future.result()
