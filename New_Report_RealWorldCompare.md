@@ -376,13 +376,15 @@ Our system's advantage is its explicit, tunable latency/accuracy tradeoff, its g
 | LSync | ~24.84 ms | None | Existing broadcast stack | Implicit |
 | **Ours (Phase 1)** | **~78 ms p50** | **NTP-style app-layer** | **Python + TCP** | **Explicit (tunable)** |
 
-### 6.3 Considerations with Real-World Timecode Synchronization Algorithms
+### 6.3 Real-World Timecode Synchronization Algorithms Comparisons
 
 We can understand most video synchronization algorithms can be categorized by their modes of what is analyzed in order to synchronize video frames, timecode-based sync, hardware-based sync, and content-based sync. For our comparisons, our jitter-buffer algorithm best aligns as a timecode synchronization algorithm, where in which a camera's timestamped metadata of a series of frames are assigned order from an outside timekeeper or "master" clock in the network. 
 
 To compare available statistics and implementation of our *jitter-buffer synchronization algorithm*, we will refer to the real-world implementation of "Timecode Sync," utilized by the commercial-grade GoPro MAX2, HERO13 and/or HERO12 cameras. 
 
-**GoPro Timecode Sync.** Timecode Sync utilizes robust/dynamic QR codes that act as the role of timekeeper. A compatible camera will capture the QR Code, and timestamp their video timelines based on the master time provided by the QR code, enabiling real-time, synchronized multi-angle footage by post-production. According to their official website, GoPro proclaims a sync accuracy of <50ms.   
+**GoPro Timecode Sync.** Timecode Sync utilizes animated QR codes with millisecond real-time updated timecodes that as timekeeper. A compatible camera will capture the QR Code, and the QR code will timestamp their video timelines based on the master time provided by the QR code, enabiling real-time, synchronized multi-angle footage by post-production. According to their official website, GoPro proclaims a sync accuracy of <50ms.
+
+A significant reason for our accuracy difference is due to the modes of implementation. Because our algorithm relies on the network connectivity of various distributed cameras, we are liable to packet losses and network congestion that will offset our synchronization accuracy. Timecode Sync's algorithm manually sets the timeline of independent cameras that have no communication with one another, rather than communicating with a network server. Moreover, a potential drawback of timecode sync's strategy may be in dynamic synchronization correction. As stated on their website, "Due to hardware limitations, the Timecode Sync will start to drift if the cameras are on (not necessarily recording) for more than 60-90 minutes. You can resync the cameras to keep them aligned," rather than an automatic process.  
 
 ---
 
