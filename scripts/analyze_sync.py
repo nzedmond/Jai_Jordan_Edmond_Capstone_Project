@@ -26,11 +26,25 @@ import pandas as pd
 
 def load(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
-    required = {"frame_index", "sync_error_ms", "latency_a_ms", "latency_b_ms"}
+    required = {"frame_index", "sync_error_ms"}
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"{csv_path}: missing columns {missing}")
+    if not get_cam_ids(df):
+        raise ValueError(f"{csv_path}: no latency_{{id}}_ms columns found")
     return df
+
+
+def get_cam_ids(df: pd.DataFrame) -> list:
+    """Return sorted camera IDs inferred from latency_{id}_ms column names."""
+    ids = []
+    for col in df.columns:
+        if col.startswith("latency_") and col.endswith("_ms"):
+            try:
+                ids.append(int(col[len("latency_"):-len("_ms")]))
+            except ValueError:
+                pass
+    return sorted(ids)
 
 
 def label_from_path(path: str) -> str:
@@ -98,30 +112,28 @@ def plot_sync_error_cdf(dfs: list, labels: list, out_dir: Path, show: bool) -> N
 def plot_latency_histogram(dfs: list, labels: list, out_dir: Path, show: bool) -> None:
     n_runs = len(dfs)
     fig, axes = plt.subplots(1, n_runs, figsize=(6 * n_runs, 4), squeeze=False)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     for ax, df, label in zip(axes[0], dfs, labels):
-        lat_a = df["latency_a_ms"].dropna().values
-        lat_b = df["latency_b_ms"].dropna().values
+        cam_ids = get_cam_ids(df)
+        all_vals = [df[f"latency_{cid}_ms"].dropna().values for cid in cam_ids]
 
-        bins = np.linspace(
-            min(lat_a.min(), lat_b.min()),
-            max(lat_a.max(), lat_b.max()),
-            40,
-        )
-        ax.hist(lat_a, bins=bins, alpha=0.6, label="cam A")
-        ax.hist(lat_b, bins=bins, alpha=0.6, label="cam B")
+        flat = np.concatenate(all_vals)
+        bins = np.linspace(flat.min(), flat.max(), 40)
+
+        for i, (vals, cid) in enumerate(zip(all_vals, cam_ids)):
+            color = colors[i % len(colors)]
+            ax.hist(vals, bins=bins, alpha=0.6, label=f"cam {cid}", color=color)
+            med = np.median(vals)
+            ax.axvline(med, color=color, linestyle="--", linewidth=1.2)
+            ax.text(med, ax.get_ylim()[1] * 0.9, f"med={med:.0f}ms",
+                    ha="center", fontsize=8, color=color)
+
         ax.set_xlabel("Latency (ms)")
         ax.set_ylabel("Count")
         ax.set_title(f"Latency — {label}")
         ax.legend()
         ax.grid(True, alpha=0.3)
-
-        # Annotate medians
-        for vals, name, color in [(lat_a, "A", "C0"), (lat_b, "B", "C1")]:
-            med = np.median(vals)
-            ax.axvline(med, color=color, linestyle="--", linewidth=1.2)
-            ax.text(med, ax.get_ylim()[1] * 0.9, f"med={med:.0f}ms",
-                    ha="center", fontsize=8, color=color)
 
     fig.tight_layout()
     out_path = out_dir / "latency_histogram.png"
@@ -183,19 +195,22 @@ def plot_phase1_boxplot(dfs: list, labels: list, out_dir: Path, show: bool,
 # ---------------------------------------------------------------------------
 
 def print_summary(dfs: list, labels: list) -> None:
-    print(f"\n{'Run':<20} {'n':>6} {'sync_p50':>10} {'sync_p95':>10} "
-          f"{'lat_a_med':>12} {'lat_b_med':>12}")
-    print("-" * 74)
+    all_cam_ids = sorted({cid for df in dfs for cid in get_cam_ids(df)})
+    lat_headers = "  ".join(f"{'lat_' + str(cid) + '_med':>12}" for cid in all_cam_ids)
+    print(f"\n{'Run':<20} {'n':>6} {'sync_p50':>10} {'sync_p95':>10}  {lat_headers}")
+    print("-" * (46 + 14 * len(all_cam_ids)))
     for df, label in zip(dfs, labels):
         sync = np.abs(df["sync_error_ms"].dropna().values)
-        lat_a = df["latency_a_ms"].dropna().values
-        lat_b = df["latency_b_ms"].dropna().values
+        lat_meds = []
+        for cid in all_cam_ids:
+            col = f"latency_{cid}_ms"
+            val = f"{np.median(df[col].dropna().values):>11.1f}ms" if col in df.columns else f"{'N/A':>12}"
+            lat_meds.append(val)
         print(
             f"{label:<20} {len(df):>6} "
             f"{np.percentile(sync, 50):>9.1f}ms "
-            f"{np.percentile(sync, 95):>9.1f}ms "
-            f"{np.median(lat_a):>11.1f}ms "
-            f"{np.median(lat_b):>11.1f}ms"
+            f"{np.percentile(sync, 95):>9.1f}ms  "
+            + "  ".join(lat_meds)
         )
     print()
 

@@ -120,16 +120,6 @@ class SyncBuffer:
                          Parent directories are created if they do not exist.
     """
 
-    CSV_COLUMNS: List[str] = [
-        "frame_index",
-        "cam_a_ts_ms",
-        "cam_b_ts_ms",
-        "playback_time_ms",
-        "latency_a_ms",
-        "latency_b_ms",
-        "sync_error_ms",
-    ]
-
     def __init__(
         self,
         stream_ids: List[int],
@@ -150,6 +140,15 @@ class SyncBuffer:
         self._lock = threading.Lock()
         self._frame_index = 0
 
+        # Build column names dynamically so any number of cameras are covered.
+        self.csv_columns: List[str] = (
+            ["frame_index"]
+            + [f"cam_{sid}_ts_ms" for sid in stream_ids]
+            + ["playback_time_ms"]
+            + [f"latency_{sid}_ms" for sid in stream_ids]
+            + ["sync_error_ms"]
+        )
+
         # CSV setup
         self._csv_file = None
         self._csv_writer = None
@@ -157,7 +156,7 @@ class SyncBuffer:
             Path(csv_path).parent.mkdir(parents=True, exist_ok=True)
             self._csv_file = open(csv_path, "w", newline="")
             self._csv_writer = csv.writer(self._csv_file)
-            self._csv_writer.writerow(self.CSV_COLUMNS)
+            self._csv_writer.writerow(self.csv_columns)
 
 
     def push(self, cam_id: int, ts_ms: int, frame: np.ndarray) -> None:
@@ -235,16 +234,14 @@ class SyncBuffer:
         latencies = {sid: now_ms - timestamps[sid] for sid in self.stream_ids}
 
         if self._csv_writer:
-            sid_a, sid_b = self.stream_ids[0], self.stream_ids[1]
-            self._csv_writer.writerow([
-                self._frame_index,
-                timestamps.get(sid_a, ""),
-                timestamps.get(sid_b, ""),
-                now_ms,
-                latencies.get(sid_a, ""),
-                latencies.get(sid_b, ""),
-                sync_error_ms,
-            ])
+            row = (
+                [self._frame_index]
+                + [timestamps.get(sid, "") for sid in self.stream_ids]
+                + [now_ms]
+                + [latencies.get(sid, "") for sid in self.stream_ids]
+                + [sync_error_ms]
+            )
+            self._csv_writer.writerow(row)
             self._csv_file.flush()
 
         self._frame_index += 1
