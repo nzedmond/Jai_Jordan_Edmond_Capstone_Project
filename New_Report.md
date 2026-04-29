@@ -1,4 +1,4 @@
-# Distributed Multi-Camera Video Synchronization over TCP
+# Distributed Multi-Camera Video Synchronization over TCP and UDP
 
 **Jai Adams · Jordan Shapiro · Edmond Nzivugira**  
 COSC 465 — Capstone Project  
@@ -14,7 +14,7 @@ Colgate University
 
 ## 1. Introduction
 
-Multi-camera video synchronization is a fundamental requirement in applications ranging from sports broadcasting to motion-capture systems. In professional settings, hardware solutions such as genlock circuits or IEEE 1588 Precision Time Protocol (PTP) achieve sub-millisecond alignment, but require specialized infrastructure. This paper investigates whether a software-only approach, implemented entirely in Python over standard TCP, can achieve useful synchronization accuracy without any hardware support.
+Multi-camera video synchronization is a fundamental requirement in applications ranging from sports broadcasting to motion-capture systems. In professional settings, hardware solutions such as genlock circuits or IEEE 1588 Precision Time Protocol (PTP) achieve sub-millisecond alignment, but require specialized infrastructure. This paper investigates whether a software-only approach, implemented entirely in Python over standard TCP or UDP, can achieve useful synchronization accuracy without any hardware support.
 
 The core challenge is twofold. First, frames from different cameras arrive at a central receiver at unpredictable times due to variable network latency (jitter). Second, when cameras operate on separate machines, their local clocks may disagree by tens of milliseconds, making raw capture timestamps from different sources non-comparable without correction.
 
@@ -29,12 +29,12 @@ Our system addresses both challenges: a jitter buffer aligns frames at the recei
 The system consists of three components: a sender (`transport.py` + `single_cam.py`), a receiver (`get_frame.py` + `sync.py`), and a clock-sync module (`clock_sync.py`). Figure 1 shows the overall data flow.
 
 ```
-[Camera A]──transport.py──clock_sync──TCP──┐
+[Camera A]──transport.py──clock_sync──TCP/UDP──┐
                                            ├──get_frame.py──sync.py──Display
-[Camera B]──transport.py──clock_sync──TCP──┘
+[Camera B]──transport.py──clock_sync──TCP/UDP──┘
 ```
 
-**Figure 1.** System block diagram. Each camera source maintains its own dedicated TCP connection to the receiver. A clock-sync handshake runs on each connection before frame streaming begins.
+**Figure 1.** System block diagram. Each camera source maintains its own dedicated TCP/UDP connection to the receiver. A clock-sync handshake runs on each connection before frame streaming begins.
 
 ### 2.1 Clock-Offset Estimation (`clock_sync.py`)
 
@@ -54,7 +54,7 @@ Each camera source runs in a dedicated capture thread. `CameraSource.read()` cal
 
 ### 2.3 Transmission and Simulated Network Conditions (`transport.py`)
 
-Each camera runs a dedicated send thread (`send_camera_frames`) over its own TCP connection, so encoding or transmission delays on one camera never block another. Each packet carries a 13-byte header:
+Each camera runs a dedicated send thread (`send_camera_frames`) over its own TCP/UDP connection, so encoding or transmission delays on one camera never block another. Each packet carries a 13-byte header:
 
 | Field | Size | Value |
 |---|---|---|
@@ -77,7 +77,7 @@ Packets are placed in a priority queue sorted by $t_{\text{deliver}}$, so a pack
 
 ### 2.4 Reception and Clock Correction (`get_frame.py`)
 
-The receiver accepts one TCP connection per expected camera stream and spawns one background receive thread per connection. Each thread reads the 13-byte header, reads the JPEG payload, decodes it, applies the clock correction:
+The receiver accepts one TCP/UDP connection per expected camera stream and spawns one background receive thread per connection. Each thread reads the 13-byte header, reads the JPEG payload, decodes it, applies the clock correction:
 
 $$t_{\text{corrected}} = t_{\text{raw}} - \delta_{\text{cam}}$$
 
