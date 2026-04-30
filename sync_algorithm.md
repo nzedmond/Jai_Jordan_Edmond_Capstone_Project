@@ -2,7 +2,7 @@
 
 ## Overview
 
-The system has two sides: a **sender** (`transport.py` + `single_cam.py`) and a **receiver** (`get_frame.py` + `sync.py`). Before any frames flow, the receiver and each sender perform a clock-sync handshake (`clock_sync.py`) to estimate and correct the clock offset between machines. Frames then flow over TCP with embedded capture timestamps, and the receiver's jitter buffer uses those corrected timestamps to align frames across streams before displaying them.
+The system has two sides: a **sender** (`transport_tcp.py` or `transport_udp.py`, plus `single_cam.py`) and a **receiver** (`get_frame_tcp.py` or `get_frame_udp.py`, plus `sync.py`). Before any frames flow in the TCP pipeline, the receiver and each sender perform a clock-sync handshake (`clock_sync.py`) to estimate and correct the clock offset between machines. The UDP receiver skips this handshake and relies on NTP-disciplined clocks. Frames then flow with embedded capture timestamps, and the receiver's jitter buffer uses those corrected timestamps to align frames across streams before displaying them.
 
 ---
 
@@ -44,9 +44,9 @@ When `CameraSource.read()` is called in the capture thread:
 
 ---
 
-## Step 3: Sending with a packet header (`transport.py`)
+## Step 3: Sending with a packet header (`transport_tcp.py` / `transport_udp.py`)
 
-Each camera runs `send_camera_frames()` in its own dedicated thread, connected to the receiver over its own dedicated TCP socket. Cameras never share a socket, so slow encoding or network congestion on one camera cannot delay another.
+Each camera runs `send_camera_frames()` in its own dedicated thread, connected to the receiver over its own dedicated TCP socket (or UDP datagram socket). Cameras never share a socket, so slow encoding or network congestion on one camera cannot delay another.
 
 For every new frame, the send thread calls `cam.get_frame()` and transmits:
 
@@ -61,9 +61,9 @@ Two details worth noting:
 
 ---
 
-## Step 4: Receiving, decoding, and clock correction (`get_frame.py`)
+## Step 4: Receiving, decoding, and clock correction (`get_frame_tcp.py` / `get_frame_udp.py`)
 
-The receiver accepts one TCP connection per expected camera stream and spawns one `_receive_loop` background thread per connection. Each thread knows the clock offset estimated for its connection during Step 1.
+The TCP receiver accepts one connection per expected camera stream and spawns one `_receive_loop` background thread per connection. Each thread knows the clock offset estimated for its connection during Step 1. The UDP receiver binds a single datagram socket and dispatches packets by the `cam_id` in each header; no per-connection offset is applied (clocks assumed NTP-synced).
 
 For each incoming packet the thread:
 
@@ -86,7 +86,7 @@ The actual synchronization algorithm has two parts.
 
 Each camera stream gets its own min-heap sorted by `ts_ms`. A min-heap is used because frames are not guaranteed to arrive in timestamp order (network reordering, variable encoding time). The heap keeps the earliest-timestamp frame at the top so `pop_up_to(cutoff)` always processes frames in chronological order. A monotonic sequence counter breaks ties so numpy arrays are never compared directly (which would crash).
 
-- `push(ts_ms, frame)` — inserts into the heap.
+- `push(ts_ms, frame)` — inserts into the heap. On every push it also updates an **EMA estimate of the stream's inter-frame interval** (`_est_interval_ms`), clamped to the range [5 ms, 500 ms] to exclude encoding noise and genuine stalls. The smoothing factor is α = 0.1.
 - `pop_up_to(cutoff_ts_ms)` — drains all frames at or before the cutoff and returns the most recent one among them. Frames older than that most-recent eligible frame are discarded.
 
 ### `try_consume()`: producing one aligned frame set
@@ -99,7 +99,15 @@ cutoff = now_ms - buffer_delay_ms
 
 Any frame captured before this moment is "old enough to display." The `buffer_delay_ms` is a deliberate look-behind window — intentionally playing the past so that both streams have had time to accumulate frames before the display loop picks from them.
 
-For each stream:
+**Rate-limiting step (heterogeneous frame rates):** Before selecting a frame, `try_consume` checks whether enough time has elapsed since this stream's last displayed frame relative to the slowest stream's estimated interval. Specifically, once every stream has a valid EMA estimate, the maximum interval across all streams (`max_interval_ms`) is computed each call. A stream is only advanced if:
+
+```
+(cutoff - last_displayed_ts) >= max_interval_ms * 0.8
+```
+
+If this condition is not met, the stream reuses its last displayed frame without calling `pop_up_to`. The 0.8 factor provides a small timing tolerance against display-loop jitter. This mechanism naturally synchronizes a 30 fps stream with a 15 fps stream without discarding valid frames prematurely.
+
+For each stream (after the rate-limit check):
 - `pop_up_to(cutoff)` returns the best frame at or before the cutoff.
 - If a qualifying frame was found, `buf.last` is updated and that frame is used.
 - If no qualifying frame exists (stream temporarily ahead, or network is slow), it **freezes on `buf.last`** — the last good frame — rather than going blank.
@@ -115,7 +123,16 @@ latency        = now_ms - ts_ms   (per stream)
 - `sync_error_ms` measures how far apart in capture time the two frames being displayed actually are. Because all `ts_ms` values have been clock-corrected in Step 4, this metric now reflects only true capture-time differences, not inter-machine clock skew.
 - `latency` measures end-to-end delay: from the moment a frame was captured to the moment it is shown.
 
-The result dict with `frames`, `sync_error_ms`, and `latencies` is returned to the display loop, which overlays the stats on screen and writes a row to CSV.
+The result dict returned to the display loop contains:
+
+| Key | Type | Description |
+|---|---|---|
+| `frames` | `{cam_id: np.ndarray}` | One BGR frame per stream |
+| `timestamps` | `{cam_id: int}` | Corrected capture timestamps (ms) |
+| `playback_time_ms` | `int` | Wall-clock time of this `try_consume` call |
+| `latencies` | `{cam_id: int}` | `playback_time_ms − ts_ms` per stream |
+| `sync_error_ms` | `int` | `max(ts_vals) − min(ts_vals)` across streams |
+| `frame_index` | `int` | Monotonic counter; matches CSV row number |
 
 ---
 
@@ -134,17 +151,18 @@ A larger buffer gives the slower stream more time to "catch up" before the displ
 ## Thread model summary
 
 ```
-Sender (per camera, per machine)        Receiver
+Sender (per camera, per machine)            Receiver
 
-[Capture thread]   [Send thread]        [Receive thread]     [Display thread]
-capture_loop()     send_camera_frames()  _receive_loop()      run_sync_display()
-  cam.read()         cam.get_frame()       recv_exact()          try_consume()
-  -> frame+ts          -> encode JPEG        -> correct ts           -> pop_up_to(cutoff)
-     under               -> sock.sendall()      -> sync_buf.push()      -> sync_error_ms
-     _frame_lock                                   under SyncBuffer._lock
+[Capture thread]   [Send thread]            [Receive thread]       [Display thread]
+capture_loop()     send_camera_frames()     _receive_loop()         run_sync_display()
+  cam.read()         cam.get_frame()          recv_exact() (TCP)       try_consume()
+  -> frame+ts          -> encode JPEG          sock.recvfrom() (UDP)      -> rate-limit check
+     under               -> sock.sendall()       -> correct ts (TCP)        -> pop_up_to(cutoff)
+     _frame_lock           (TCP/UDP)             -> sync_buf.push()         -> sync_error_ms
+                                                    under SyncBuffer._lock
 ```
 
-Before the send/receive threads start, the handshake runs synchronously:
+Before the send/receive threads start, the TCP handshake runs synchronously (UDP skips this):
 ```
 [clock_sync.serve_clock_sync()]   <--->   [clock_sync.measure_offset()]
        (sender, after connect)                 (receiver, after accept)
