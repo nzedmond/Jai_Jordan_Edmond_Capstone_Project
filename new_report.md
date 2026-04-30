@@ -134,21 +134,21 @@ The core tradeoff: larger $d_{\text{buffer}}$ reduces synchronization error by g
 
 ```bash
 # Receiver — TCP 
-python scripts/get_frame.py --port 9000 --sync \
-  --buffer-delay-ms <N> --csv 2camlogs/tcp_buff<N>.csv \
+python scripts/get_frame_tcp.py --port 9000 --sync \
+  --buffer-delay-ms <N> --csv --stream-ids <0, 1, 2, ..> 2camlogs/tcp_buff<N>.csv \
   --stream-ids 0 1
 
 # Receiver — UDP 
-python scripts/get_frame_copy.py --port 9000 --sync \
-  --buffer-delay-ms <N> --csv 2camlogs/udp_buff<N>.csv \
+python scripts/get_frame_udp.py --port 9000 --sync \
+  --buffer-delay-ms <N> --csv --stream-ids <0, 1, 2, ..> 2camlogs/udp_buff<N>.csv \
   --stream-ids 0 1
 
 # Camera 0 machine — TCP
-python scripts/transport.py --sources 0 \
+python scripts/transport_tcp.py --sources 0 \
   --host <receiver_ip> --port 9000 --cam-id-start 0
 
 # Camera 1 machine — TCP
-python scripts/transport.py --sources 0 \
+python scripts/transport_tcp.py --sources 0 \
   --host <receiver_ip> --port 9000 --cam-id-start 1
 
 # Camera 0 machine — UDP
@@ -202,9 +202,9 @@ The dominant finding: **TCP Phase 1 collapsed almost immediately** (33–59 fram
 | tcp\_buff150 | 1120 | 18,718 ms | 41,567 ms | 6,167 ms | 25,354 ms |
 | tcp\_buff400 | 1011 | 13,259 ms | 34,691 ms |   942 ms | 14,623 ms |
 
-The TCP overall statistics are almost entirely Phase 2 artifact. Only 33–59 out of 1,000–1,278 frames (~3–5%) fell within the Phase 1 window (sync error ≤ 500 ms), meaning one camera stream froze within the first ~1–2 seconds and never recovered. The latency asymmetry makes the failure mode explicit: in `tcp_buff0`, Camera 0's median latency was 2,707 ms while Camera 1's was 21,991 ms — a 20-second gap. The same pattern holds across all three buffer depths, with one stream always running 14,000–25,000 ms behind the other.
+The TCP overall statistics are almost entirely Phase 2 artifact. Only 33–59 out of 1,000–1,278 frames (~3–5%) fell within the Phase 1 window (sync error ≤ 500 ms), because one camera stream froze within the first ~1–2 seconds and never recovered (we decided to keep these results because they were worth noticing and describing. We wanted to answer the question of what would the user expect if one camera on the network stalls or fails?). The latency asymmetry makes the failure mode explicit: in `tcp_buff0`, Camera 0's median latency was 2,707 ms while Camera 1's was 21,991 ms — a 20-second gap. The same pattern holds across all three buffer depths, with one stream always running 14,000–25,000 ms behind the other.
 
-The root cause is TCP head-of-line blocking. Over the ad-hoc WiFi network, packet loss forced retransmissions on Camera 1's connection. Because TCP guarantees ordered in-sequence delivery, the receive thread blocked waiting for the retransmitted segment, causing a backlog of frames to accumulate behind the lost one. Once the receiver fell behind, the jitter buffer saw no fresh frames from Camera 1 past the cutoff and switched to frozen-frame mode permanently. The `tcp_buff400` run shows a slightly lower overall p50 (13,259 ms vs. 21,218 ms) because the 400 ms cutoff gives the stalled stream marginally more time to catch up during the opening seconds — but the stall is too severe for the buffer to overcome.
+The root cause is TCP head-of-line blocking. Over the ad-hoc WiFi network, packet loss forced retransmissions on Camera 1's connection. Because TCP guarantees ordered in-sequence delivery, the receive thread blocked waiting for the retransmitted segment, causing a backlog of frames to accumulate behind the lost one. Once the receiver fell behind, the jitter buffer saw no fresh frames from Camera 1 past the cutoff and switched to frozen-frame mode permanently. The `tcp_buff400` run shows a slightly lower overall p50 (13,259 ms vs. 21,218 ms) because the 400 ms cutoff gives the stalled stream marginally more time to catch up during the opening seconds, but the stall is too severe for the buffer to overcome (We observed a buffer out of space flag in the terminal when the scripts were running).
 
 **Figure 2a.** Sync error over time — TCP. The steep linear ramp beginning within the first ~50 frames confirms that Camera 1 froze almost immediately and never recovered across all three buffer depths.
 ![TCP sync error over time](2camfigures/tcp_sync_error_over_time.png)
@@ -223,11 +223,11 @@ The root cause is TCP head-of-line blocking. Over the ad-hoc WiFi network, packe
 | udp\_buff150 | 830 |   613 ms | 2,291 ms |   198 ms |   849 ms |
 | udp\_buff400 | 804 | 1,024 ms | 2,269 ms | 1,335 ms | 1,052 ms |
 
-UDP behaved fundamentally differently. Without a retransmission requirement, a lost packet is simply skipped — the receive thread reads the next arriving datagram immediately, so no backlog forms. Both streams stayed active for 170–337 Phase 1 frames across all buffer depths, 6–10× more active coverage than TCP. The overall sync p50 values (568–1,024 ms) are also 13–37× lower than TCP's, reflecting real WiFi jitter rather than a permanent stream stall.
+UDP behaved fundamentally differently. Without a retransmission requirement, a lost packet is simply skipped, the receive thread reads the next arriving datagram immediately, so no backlog forms. Both streams stayed active for 170–337 Phase 1 frames across all buffer depths, 6–10× more active coverage than TCP. The overall sync p50 values (568–1,024 ms) are also 13–37× lower than TCP's, reflecting real WiFi jitter rather than a permanent stream stall.
 
 Within UDP, increasing buffer depth improved Phase 1 sync accuracy as expected: p50 fell from 236 ms (0 ms buffer) → 207 ms (150 ms buffer) → 129 ms (400 ms buffer). A deeper buffer gives late-arriving datagrams more time to reach the receiver before the cutoff, reducing the frequency of pairing a fresh frame from one camera with a stale frame from the other. The `udp_buff400` run shows fewer Phase 1 frames (170) than `udp_buff0` and `udp_buff150` (329, 337): with a 400 ms lookback, the rate-limiting logic in `try_consume` is more sensitive to small per-camera frame-rate differences, occasionally pushing sync errors above the 500 ms Phase 1 threshold even when both streams are healthy.
 
-The latency medians under UDP are not monotonically ordered with buffer depth (`lat_0` goes 377 → 198 → 1,335 ms). This is expected: clock-offset correction is absent in the UDP receiver, so the displayed latency reflects the raw capture-to-display gap including any inter-machine clock skew — not a pure buffer-depth effect.
+The latency medians under UDP are not monotonically ordered with buffer depth (`lat_0` goes 377 → 198 → 1,335 ms). This is expected: clock-offset correction is absent in the UDP receiver, so the displayed latency reflects the raw capture-to-display gap including any inter-machine clock skew, not a pure buffer-depth effect.
 
 **Figure 2b.** Sync error over time — UDP. Both streams remain active for the majority of each run; sync error stays low and relatively flat before rising modestly in the tail, in contrast to TCP's immediate ramp.
 ![UDP sync error over time](2camfigures/udp_sync_error_over_time.png)
@@ -240,7 +240,7 @@ The latency medians under UDP are not monotonically ordered with buffer depth (`
 
 #### 4.1.3 Summary: TCP vs. UDP
 
-The core finding is that TCP's reliability guarantee is a liability over a lossy WiFi link for live video: a single burst of retransmissions on one camera's connection permanently collapses that stream's synchronization. UDP's drop-and-continue behavior is the correct transport choice for this application — the jitter buffer is designed to absorb variable arrival time, not to wait indefinitely for retransmitted segments. UDP also exposes the intended buffer-depth tradeoff (larger buffer → lower Phase 1 sync error, higher latency) that TCP's early stall obscures entirely.
+The core finding is that TCP's reliability guarantee is a liability over a lossy WiFi link for live video: a single burst of retransmissions on one camera's connection permanently collapses that stream's synchronization. UDP's drop-and-continue behavior is the correct transport choice for this application, the jitter buffer is designed to absorb variable arrival time, not to wait indefinitely for retransmitted segments. UDP also exposes the intended buffer-depth tradeoff (larger buffer → lower Phase 1 sync error, higher latency) that TCP's early stall obscures entirely.
 
 ---
 
@@ -252,7 +252,7 @@ The core finding is that TCP's reliability guarantee is a liability over a lossy
 **Figure 6.** Latency distributions for cameras A (Tapo 1), B (Tapo 2), C (MacBook 1), and D (MacBook 2) using UDP.
 ![4 Camera UDP latency histogram](figures/latency_histogram_udp4cam.png)
 
-The latency distributions reveal a sharp contrast between TCP and UDP when synchronizing four streams. Under TCP, all four streams exhibit high and widely dispersed latencies, with medians ranging roughly from 20,000 ms to over 80,000 ms depending on buffer depth. While increased buffering somewhat reduces this disparity, frames remain temporally misaligned, limiting the effectiveness of real-time synchronization — the algorithm is forced to operate on stale data and compensate for large timing gaps that buffer depth alone cannot close.
+The latency distributions reveal a sharp contrast between TCP and UDP when synchronizing four streams. Under TCP, all four streams exhibit high and widely dispersed latencies, with medians ranging roughly from 20,000 ms to over 80,000 ms depending on buffer depth. While increased buffering somewhat reduces this disparity, frames remain temporally misaligned, limiting the effectiveness of real-time synchronization, the algorithm is forced to operate on stale data and compensate for large timing gaps that buffer depth alone cannot close.
 
 In contrast, UDP produces tightly clustered latency distributions at the lower end of the range, with most frames arriving within a few seconds and strong alignment across all four cameras. This naturally supports real-time synchronization, as inter-stream latency differences are small. However, UDP introduces occasional outliers at higher `--buffer-delay-ms` values due to packet loss or reordering. Overall, TCP prioritizes reliability at the cost of timeliness and alignment, whereas UDP provides low-latency, near-synchronous data better suited for real-time multi-camera synchronization.
 
@@ -264,7 +264,7 @@ In contrast, UDP produces tightly clustered latency distributions at the lower e
 
 Building on the latency results, sync error over time further highlights the protocol tradeoff at four-camera scale. Under TCP, sync error remains consistently high and drifts upward throughout each run, with values often exceeding 30,000–60,000 ms. Even with increased buffering, which slightly stabilizes the curves, the system accumulates error rather than correcting it. This reflects TCP's tendency to deliver delayed but in-order frames, causing the synchronization algorithm to operate on temporally misaligned streams that do not naturally converge. Buffering primarily shifts the magnitude of the error rather than eliminating it.
 
-UDP exhibits a drastically different profile: periodic spikes followed by sharp corrections, producing a sawtooth pattern. Sync error grows as frames diverge but is repeatedly corrected when more closely aligned frames arrive, demonstrating that the jitter buffer can dynamically realign streams despite occasional packet loss or reordering. However, at higher buffer sizes (400 ms) with four cameras, more sustained drift emerges as the buffer fills and drops arrive more frequently. Ultimately, these results reinforce that UDP — despite its unreliability at the packet level — enables more effective real-time synchronization by preserving low latency and allowing the algorithm to correct misalignment continuously, whereas TCP's ordering constraints prevent meaningful convergence of synchronization error.
+UDP exhibits a drastically different profile: periodic spikes followed by sharp corrections, producing a sawtooth pattern. Sync error grows as frames diverge but is repeatedly corrected when more closely aligned frames arrive, demonstrating that the jitter buffer can dynamically realign streams despite occasional packet loss or reordering. However, at higher buffer sizes (400 ms) with four cameras, more sustained drift emerges as the buffer fills and drops arrive more frequently. Ultimately, these results reinforce that UDP, despite its unreliability at the packet level, enables more effective real-time synchronization by preserving low latency and allowing the algorithm to correct misalignment continuously, whereas TCP's ordering constraints prevent meaningful convergence of synchronization error.
 
 ---
 
@@ -286,11 +286,11 @@ Our best-case Phase 1 p50 (129 ms with a 400 ms buffer under UDP) is approximate
 
 ### 5.2 LSync
 
-LSync synchronizes heterogeneous media streams — specifically, an ancillary information stream (statistics, subtitles) against a primary live video stream that travels through an entirely separate broadcast pipeline. Its core insight is to embed a timing reference directly into the audio content: the receiver detects this in-band audio signal to determine where the ancillary stream belongs in the video timeline, eliminating any dependency on a shared clock. Our system takes the opposite approach: capture timestamps are meaningful only because all cameras share a common clock; network jitter is absorbed by a receiver-side jitter buffer.
+LSync synchronizes heterogeneous media streams, specifically, an ancillary information stream (statistics, subtitles) against a primary live video stream that travels through an entirely separate broadcast pipeline. Its core insight is to embed a timing reference directly into the audio content: the receiver detects this in-band audio signal to determine where the ancillary stream belongs in the video timeline, eliminating any dependency on a shared clock. Our system takes the opposite approach: capture timestamps are meaningful only because all cameras share a common clock; network jitter is absorbed by a receiver-side jitter buffer.
 
-This architectural difference explains most of the accuracy gap. LSync's 24.84 ms error is bounded by audio buffer granularity and signal detection latency — relatively stable sources of error. Our system's 129–236 ms p50 under UDP is driven by WiFi jitter (±30 ms per packet in our experiments) and the jitter buffer's 33 ms sampling resolution at 30 fps. Both are fundamentally different error ceilings: LSync's is set by audio processing, ours by network conditions and frame rate.
+This architectural difference explains most of the accuracy gap. LSync's 24.84 ms error is bounded by audio buffer granularity and signal detection latency, relatively stable sources of error. Our system's 129–236 ms p50 under UDP is driven by WiFi jitter (±30 ms per packet in our experiments) and the jitter buffer's 33 ms sampling resolution at 30 fps. Both are fundamentally different error ceilings: LSync's is set by audio processing, ours by network conditions and frame rate.
 
-In terms of deployment, LSync is deliberately infrastructure-agnostic — the timing signal rides inside the audio and is invisible to any CDN or delivery pipeline. Our system requires both endpoints to run our custom code, but in exchange it is generalizable to any number of simultaneous video streams and exposes an explicit, user-controlled latency–accuracy tradeoff (`buffer_delay_ms`) that LSync does not offer. LSync also requires an audio channel, making it inapplicable to muted or audio-free streams.
+In terms of deployment, LSync is deliberately infrastructure-agnostic, the timing signal rides inside the audio and is invisible to any CDN or delivery pipeline. Our system requires both endpoints to run our custom code, but in exchange it is generalizable to any number of simultaneous video streams and exposes an explicit, user-controlled latency–accuracy tradeoff (`buffer_delay_ms`) that LSync does not offer. LSync also requires an audio channel, making it inapplicable to muted or audio-free streams.
 
 ### 5.3 PTP
 
@@ -325,8 +325,6 @@ Notably, `udp_buff400` produced fewer Phase 1 frames (170) than `udp_buff0` and 
 
 The intended tradeoff — larger buffer depth reduces sync error at the cost of higher end-to-end latency — is directionally visible in the UDP Phase 1 data. Sync p50 falls from 236 ms to 129 ms as buffer depth grows from 0 to 400 ms, while latency is expected to rise by approximately the buffer depth added.
 
-The UDP latency medians in the full-session data are not cleanly monotonic (`lat_0` goes 377 → 198 → 1,335 ms across the three runs), because the UDP receiver has no clock-offset correction. The raw latency metric — `now_ms - ts_ms` — folds in inter-machine clock skew, making direct cross-run comparisons unreliable. Under TCP, where clock-offset correction was applied, the latency numbers behave more as expected but are dominated by the stream-stall artifact rather than buffer depth. A faithful measurement of the latency–accuracy tradeoff under UDP would require re-adding clock synchronization to the UDP pipeline, which was removed during the TCP-to-UDP conversion.
-
 ### 6.3 TCP vs. UDP Transport Reliability
 
 The most consequential finding across both experiments is that TCP is fundamentally unsuitable as a transport layer for live multi-camera video over a lossy WiFi link. In Experiment A, TCP streams entered Phase 2 (stream freeze) within the first 1–2 seconds in all three buffer-depth runs, leaving only 33–59 valid Phase 1 frames out of 1,000–1,278 total (~3–5%). The latency asymmetry between cameras (e.g., 2,707 ms vs. 21,991 ms median in `tcp_buff0`) is the signature of head-of-line blocking: one camera's TCP connection stalled on retransmissions, causing its receive thread to block and fall irreversibly behind.
@@ -339,17 +337,17 @@ The practical implication is clear: for real-time video synchronization over wir
 
 Comparing Experiments A and B reveals how the system scales. Under UDP, moving from two to four cameras increased network load and introduced frame-rate heterogeneity (two Tapo cameras at 15 fps alongside two MacBook webcams at ~30 fps). The sawtooth sync error pattern observed in Experiment B — versus the flatter profile in Experiment A — indicates that with more streams, the jitter buffer must work harder to find well-aligned frame combinations at each display tick. The 400 ms buffer in particular showed more sustained drift in Experiment B than in Experiment A, suggesting that the buffer's capacity to absorb jitter does not scale linearly with stream count.
 
-The frame-rate mismatch between cameras is an additional factor not present in Experiment A. The jitter buffer's `try_consume` function selects one frame per stream per display tick regardless of each stream's native frame rate. The 30 fps MacBook streams accumulate roughly twice as many frames between display ticks as the 15 fps Tapo streams, giving them a larger selection of candidate frames at each cutoff. This asymmetry slightly favors the higher-fps streams in pairing accuracy and means the sync error metric is not equally attributable to all four cameras.
+The frame-rate mismatch between cameras is an additional factor not present in Experiment A. The jitter buffer's `try_consume` function selects one frame per stream per display tick regardless of each stream's native frame rate. The 30 fps MacBook streams accumulate roughly twice as many frames between display ticks as the 15 fps Tapo streams, giving them a larger selection of candidate frames at each cutoff.
 
 ### 6.5 Limitations
 
-1. **Missing clock-offset correction in the UDP pipeline.** The UDP receiver (`get_frame_copy.py`) does not perform the NTP-style clock handshake that the TCP receiver does. In practice, this is not a significant concern for the **sync error metric**: all machines used in both experiments are MacBooks that were NTP-synced before joining the ad-hoc network, and clock drift over a few minutes of experiment time is approximately 1–5 ms — well below the 129–236 ms sync errors being measured. However, the **latency metric** is affected: if a sender's clock is ahead of the receiver's by X ms, the reported latency is understated by X ms (or overstated if behind). This explains the non-monotonic UDP latency medians across buffer-depth runs and means those values should be treated as approximations rather than true end-to-end measurements. A future distributed experiment involving non-Apple hardware or longer sessions would require restoring clock correction to the UDP receiver.
+1. **Missing clock-offset correction uncertainty.**  In practice, this is not a significant concern for the **sync error metric**: all machines used in both experiments are MacBooks that were NTP-synced before joining the ad-hoc network, and clock drift over a few minutes of experiment time is approximately 1–5 ms — well below the 129–236 ms sync errors being measured. A future distributed experiment involving non-Apple hardware or longer sessions would reveal how our NTP-style handshake corrects clock differences.
 
 2. **WiFi-specific conditions.** All experiments ran over an ad-hoc 2.4 GHz WiFi network with no other traffic. This is among the least reliable transport environments for live video. On 5 GHz WiFi or wired Ethernet, packet loss would be substantially lower, and TCP's head-of-line blocking problem would be less severe. The results reported here represent a worst-case transport scenario for TCP and a realistic one for UDP.
 
 3. **TCP stall prevents fair buffer-depth comparison.** Because TCP streams freeze within the first few seconds in all runs, it is impossible to evaluate the buffer's effect on TCP synchronization accuracy. A controlled comparison would require either a lower-loss network or reduced JPEG quality to bring bandwidth demand within the link's reliable capacity.
 
-4. **Heterogeneous frame rates in Experiment B.** The Tapo cameras run at 15 fps and the MacBook webcams at ~30 fps. The jitter buffer does not account for frame-rate differences — it applies the same cutoff logic to all streams regardless of their native rate. This causes the higher-fps streams to accumulate more frames per buffer window, slightly biasing the sync-error metric in their favor.
+4. **Heterogeneous frame rates in Experiment B.** The Tapo cameras run at 15 fps and the MacBook webcams at ~30 fps. The jitter buffer applies the same cutoff logic to all streams regardless of their native rate. This causes the higher-fps streams to accumulate more frames per buffer window, slightly biasing the sync-error metric in their favor.
 
 5. **Software timestamping noise.** Capture timestamps are recorded in Python immediately after `cap.read()` returns. OS scheduling jitter in the Python runtime adds approximately 1–5 ms of uncertainty to each timestamp. This is the noise floor for synchronization accuracy in a software-only system and cannot be reduced without hardware timestamping at the sensor or NIC level.
 
@@ -361,7 +359,7 @@ This project showed that software-only multi-camera synchronization is feasible 
 
 The primary remaining accuracy ceiling is not a single algorithmic flaw but a stack of practical limits: software timestamping jitter (1–5 ms floor), simplified jitter assumptions in the model, and possible path asymmetry in application-layer clock-offset estimation. In addition, Experiment B exposed an important scalability limitation: framerate mismatch (15 fps Tapo vs ~30 fps webcams) biases frame selection in `try_consume`, making synchronization quality uneven across streams as camera count grows.
 
-Overall, the contribution is a software-only, infrastructure-free jitter-buffer pipeline that reaches **129 ms** median synchronization error with explicit latency control, at a cost of about **104 ms** versus LSync (24.84 ms) and at least **5 orders of magnitude** versus PTP (<1 µs). The next steps are clear: add hardware-level timestamps, integrate PTP where available, make buffer depth adaptive to observed jitter, and normalize framerate across heterogeneous cameras before frame pairing.
+Overall, the contribution is a software-only, infrastructure-free jitter-buffer pipeline that reaches **129 ms** median synchronization error with explicit latency control, at a cost of about **104 ms** versus LSync (24.84 ms) and at least **5 orders of magnitude** versus PTP (<1 µs). The next steps includes the following: add hardware-level timestamps, integrate PTP where available, make buffer depth adaptive to observed jitter, and normalize framerate across heterogeneous cameras before frame pairing.
 
 ---
 ## Appendix A — Algorithm Parameters
@@ -376,6 +374,9 @@ Overall, the contribution is a software-only, infrastructure-free jitter-buffer 
 | Clock-sync rounds | `NUM_ROUNDS` in `clock_sync.py` | 8 | Number of ping-pong exchanges per connection |
 | JPEG quality | `--jpeg-quality` | 90 | Encoding quality; trades file size for image fidelity |
 | Target display rate | `--fps` | 30 fps | Rate at which `try_consume()` is called |
+| Stream IDs to sync | `--stream-ids` | `0 1` | Camera IDs the receiver will synchronize; must match sender `--cam-id-start` values |
+| Camera ID offset | `--cam-id-start` | 0 | First camera ID assigned on a sender machine; set to 1 on the second machine so streams are uniquely labeled |
+| Phase 1 threshold | `phase1_threshold_ms` in `analyze_sync.py` | 500 ms | Sync-error ceiling used to separate active Phase 1 frames from Phase 2 frozen-frame artifact in all result tables |
 
 ## Appendix B — Reproducing the Experiments
 
