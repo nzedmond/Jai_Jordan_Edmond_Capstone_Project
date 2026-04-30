@@ -1,4 +1,4 @@
-# Distributed Video Synchronization over TCP
+# Distributed Multi-Camera Video Synchronization over TCP and UDP
 
 **Jai Adams · Jordan Shapiro · Edmond Nzivugira**
 COSC 465 — Capstone Project
@@ -7,19 +7,18 @@ COSC 465 — Capstone Project
 
 This project investigates the question: *"How can distributed video sources be aligned in time when network conditions cause frames to arrive at different times?"*
 
-In broadcasting and videography, hardware solutions like genlock or post-production techniques are commonly used to synchronize multiple feeds. This project explores a software-based alternative: capturing video streams from multiple sources, timestamping each frame at capture time, transmitting over TCP, and implementing a synchronization algorithm at the receiver using buffering and timestamp alignment.
+In broadcasting and videography, hardware solutions like genlock or post-production techniques are commonly used to synchronize multiple feeds. This project explores a software-based alternative: capturing video streams from multiple sources, timestamping each frame at capture time, transmitting over **TCP or UDP**, and implementing a synchronization algorithm at the receiver using a jitter buffer and NTP-style clock-offset correction.
 
-The system is built in Python using OpenCV and standard library sockets. The end goal is a quantitative analysis of the tradeoff between **synchronization accuracy** and **latency** under simulated network conditions (delay, jitter).
+The system is built in Python using OpenCV and standard library sockets. Experiments were run over a real ad-hoc WiFi network with 2 and 4 cameras, comparing TCP vs. UDP at three buffer depths (0, 150, 400 ms). Key finding: TCP collapses due to head-of-line blocking on WiFi; UDP sustains active synchronization with a best-case p50 sync error of **129 ms** (400 ms buffer). Full analysis is in `New_Report.md`.
 
 ---
 
-## Project Plan
+## Experiments Completed
 
-| Milestone | Goal |
-|---|---|
-| Status Report 1 | Capture, transmit, and display multiple streams; baseline misalignment measurements |
-| Status Report 2 | Synchronization algorithm; experiments with simulated network delay; preliminary results |
-| Final | Full sync system; quantitative latency vs. accuracy analysis; written report |
+| Experiment | Setup | Key result |
+|---|---|---|
+| A — 2 cameras, TCP vs. UDP | 2 MacBooks over ad-hoc WiFi, 3 buffer depths (0/150/400 ms) | TCP stalled within ~1 s; UDP best p50 = 129 ms (400 ms buf) |
+| B — 4 cameras, TCP vs. UDP | 2 Tapo IP cams + 2 MacBook webcams, same network | TCP sync error drifted to 30–60 s; UDP showed sawtooth recovery |
 
 ---
 
@@ -27,27 +26,22 @@ The system is built in Python using OpenCV and standard library sockets. The end
 
 ```
 scripts/
-    capture.py           # Single-camera capture with UTC timestamps (standalone)
+    capture.py           # Single-camera preview with UTC timestamp overlay (standalone)
+    capture_udp.py       # UDP-specific capture helper
     single_cam.py        # CameraSource class — thread-safe frame + timestamp access
-    multicam_handler.py  # Multi-camera local display in a grid layout
-    transport.py         # TCP sender: captures frames, encodes JPEG, sends with header
-    get_frame.py         # TCP receiver: parses header, decodes JPEG, displays frames
-    clock_sync.py        # NTP-style clock offset estimation (runs before frame streaming)
+    multicam_handler.py  # Multi-camera local display in a grid layout (no network)
+    transport_tcp.py     # TCP sender: captures frames, encodes JPEG, sends with 13-byte header
+    transport_udp.py     # UDP sender: same interface as transport_tcp.py
+    get_frame_tcp.py     # TCP receiver: clock-sync handshake, jitter buffer, display
+    get_frame_udp.py     # UDP receiver: jitter buffer, display (no clock-sync handshake)
+    clock_sync.py        # NTP-style clock offset estimation (used by TCP pipeline)
     sync.py              # SyncBuffer — jitter-buffer synchronizer for multi-stream alignment
     analyze_sync.py      # Reads experiment CSVs and produces sync error / latency plots
-    figures/
-        sync_error_over_time.png  # Plot: sync error vs. frame index
-        sync_error_cdf.png        # Plot: CDF of absolute sync error
-        latency_histogram.png     # Plot: per-stream latency distributions
-videos/
-    test_01.mp4          # Sample video for testing without a live camera
-    test_02.mp4          # Second sample video (simulates a second camera stream)
-logs/
-    run.csv              # Per-frame sync metrics logged by get_frame.py --sync --csv
-notes/
-    syncAlgo.md          # Walkthrough of the synchronization algorithm design
-tests/
-    one_line_recv.txt    # Test fixture for the TCP receive path
+figures/                 # Plots from 4-camera experiments
+2camfigures/             # Plots from 2-camera experiments
+logs/                    # Per-frame CSV logs from all experiments
+2camlogs/                # Per-frame CSV logs from 2-camera distributed experiments
+New_Report.md            # Full written report (system design, results, comparison, conclusions)
 requirements.txt         # Python dependencies
 Jordan_Jai_Edmond_Capstone Project Proposal.pdf
 ```
@@ -85,7 +79,7 @@ python multicam_handler.py --sources 0 1 --timestamp-format epoch_ms
 
 ---
 
-### `transport.py` + `get_frame.py` — TCP streaming pipeline
+### `transport_tcp.py` + `get_frame_tcp.py` — TCP streaming pipeline
 
 Each frame is sent as a 13-byte header followed by JPEG data:
 ```
@@ -100,50 +94,74 @@ Before any frames are sent, each sender and receiver exchange a clock-sync hands
 **Single-machine usage (two sources on one sender):**
 ```bash
 # Terminal 1 — receiver
-python get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
+python scripts/get_frame_tcp.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
 
 # Terminal 2 — sender with two sources
-python transport.py --sources ../videos/test_01.mp4 ../videos/test_02.mp4 --host 127.0.0.1 --port 9000
+python scripts/transport_tcp.py --sources 0 1 --host 127.0.0.1 --port 9000
 ```
 
 **Distributed usage (one camera per machine):**
 ```bash
-# Mac Mini (receiver)
-python get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/run.csv
+# Receiver machine
+python scripts/get_frame_tcp.py --port 9000 --sync --buffer-delay-ms 150 --csv logs/distributed_run.csv --stream-ids 0 1
 
 # Machine A — camera 0  (connect first)
-python transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
+python scripts/transport_tcp.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
 
 # Machine B — camera 1  (connect second)
-python transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
+python scripts/transport_tcp.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
 ```
 
-`transport.py` flags:
+`transport_tcp.py` flags (identical flags in `transport_udp.py` except JPEG default is 80):
 
 | Flag | Default | Description |
 |---|---|---|
 | `--sources` | required | Camera sources (device index, file path, or RTSP URL) |
 | `--host` | required | Receiver host IP |
 | `--port` | required | Receiver port |
-| `--cam-id-start` | `0` | First camera ID assigned to this sender's sources. Set to `1` on the second machine in a distributed setup so streams have distinct IDs. |
+| `--cam-id-start` | `0` | First camera ID for this sender's sources. Set to `1` on the second machine so streams have distinct IDs. |
 | `--timestamp-format` | `iso` | `iso` (ISO 8601 ms) or `epoch_ms` (Unix ms) |
 | `--jpeg-quality` | `90` | JPEG encoding quality (1–100) |
-| `--base-delay-ms` | `0` | Fixed artificial delay per packet in ms (simulates network latency) |
-| `--jitter-ms` | `0` | Uniform jitter half-range per packet in ms (simulates network jitter) |
+| `--base-delay-ms` | `0` | Fixed artificial delay per packet in ms |
+| `--jitter-ms` | `0` | Max extra delay (ms) added during a Markov-chain jitter burst |
+| `--burst-prob` | `0.05` | Probability per packet of entering a jitter burst |
+| `--burst-duration` | `10` | Expected packets per burst; exit probability = 1/burst-duration |
 
-`get_frame.py` flags:
+`get_frame_tcp.py` / `get_frame_udp.py` flags (identical interface; TCP version also runs the clock-sync handshake):
 
 | Flag | Default | Description |
 |---|---|---|
 | `--port` | required | Port to listen on |
 | `--host` | `0.0.0.0` | Bind address |
 | `--sync` | off | Enable jitter-buffer synchronization |
-| `--buffer-delay-ms` | `100` | Jitter buffer depth in ms — larger values reduce sync error at the cost of latency |
+| `--buffer-delay-ms` | `100` | Jitter buffer depth in ms — larger = lower sync error, higher latency |
 | `--fps` | `30.0` | Target playback frame rate |
 | `--csv` | none | Path to write per-frame sync metrics CSV (only used with `--sync`) |
-| `--stream-ids` | `0 1` | Camera IDs to expect. Also controls how many TCP connections the receiver waits for before starting. |
+| `--stream-ids` | `0 1` | Camera IDs to synchronize; also sets how many connections the receiver waits for |
 
 Press `q` in the display window or `Ctrl+C` in either terminal to shut down cleanly.
+
+---
+
+### `transport_udp.py` + `get_frame_udp.py` — UDP streaming pipeline
+
+Drop-in UDP alternative to the TCP pipeline. Packets are sent as individual datagrams; if a datagram is lost the receiver simply skips it and reads the next one — no backlog forms. The UDP receiver does **not** run a clock-sync handshake (assumes NTP-disciplined clocks), so the latency metric in CSV logs may reflect inter-machine clock skew.
+
+```bash
+# Receiver machine
+python scripts/get_frame_udp.py --port 9000 --sync \
+  --buffer-delay-ms 150 --csv 2camlogs/udp_buff150.csv --stream-ids 0 1
+
+# Machine A — camera 0
+python scripts/transport_udp.py --sources 0 \
+  --host <receiver_ip> --port 9000 --cam-id-start 0
+
+# Machine B — camera 1
+python scripts/transport_udp.py --sources 0 \
+  --host <receiver_ip> --port 9000 --cam-id-start 1
+```
+
+Flag interface is identical to `transport_tcp.py` / `get_frame_tcp.py` (see tables above), with the sole difference that `transport_udp.py` defaults `--jpeg-quality` to `80` instead of `90`.
 
 ---
 
@@ -199,60 +217,28 @@ pip install opencv-python numpy matplotlib pandas
 Python 3.10+ recommended. All other dependencies (`socket`, `struct`, `threading`, `concurrent.futures`) are from the standard library.
 
 
-## RUNNING MEASUREMENTS WITH PRERECORDED VIDEOS
-
-Both video files are passed to a single `transport.py` instance on the same machine. The receiver waits for two connections (one per source), runs the clock-sync handshake on each (offset will be ~0ms since both originate from the same clock), then begins the jitter-buffer experiment.
-
-- **Experiment 01: no buffer**
-```bash
-# Terminal 1
-python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 0 --csv logs/no_buf.csv
-
-# Terminal 2
-python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
-```
-
-- **Experiment 02: buffer = 100ms**
-```bash
-# Terminal 1
-python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/buf100.csv
-
-# Terminal 2
-python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
-```
-
-- **Experiment 03: buffer = 300ms**
-```bash
-# Terminal 1
-python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 300 --csv logs/buf300.csv
-
-# Terminal 2
-python scripts/transport.py --sources videos/test_01.mp4 videos/test_02.mp4 --host 127.0.0.1 --port 9000 --base-delay-ms 50 --jitter-ms 30
-```
-
-- **Analyze all three experiments together:**
-```bash
-python scripts/analyze_sync.py logs/no_buf.csv logs/buf100.csv logs/buf300.csv
-```
-
----
-
 ## RUNNING WITH DISTRIBUTED CAMERAS (multi-machine)
 
 This is the primary scenario the clock-sync handshake is designed for. Each camera source runs `transport.py` on its own machine. The receiver waits for all expected connections before starting.
 
-**Start the receiver first (Mac Mini or any designated server):**
+**Start the receiver first:**
 ```bash
-python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/distributed_run.csv
+# TCP
+python scripts/get_frame_tcp.py --port 9000 --sync --buffer-delay-ms 150 --csv logs/distributed_run.csv --stream-ids 0 1
+
+# UDP
+python scripts/get_frame_udp.py --port 9000 --sync --buffer-delay-ms 150 --csv logs/distributed_run_udp.csv --stream-ids 0 1
 ```
 
 **Then start each sender (one per machine, in order):**
 ```bash
-# Machine A — cam 0 (connect first)
-python scripts/transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
+# Machine A — cam 0 (TCP)
+python scripts/transport_tcp.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 0
 
-# Machine B — cam 1 (connect second)
-python scripts/transport.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
+# Machine B — cam 1 (TCP)
+python scripts/transport_tcp.py --sources 0 --host <receiver_ip> --port 9000 --cam-id-start 1
+
+# (replace transport_tcp.py with transport_udp.py for UDP runs)
 ```
 
 The receiver will print the estimated clock offset for each incoming connection before frame streaming begins, e.g.:
@@ -278,13 +264,11 @@ python scripts/capture.py --source rtsp://USERNAME:PASSWORD@192.168.2.4:554/stre
 
 To run the full sync experiment (webcam as cam 0, IP cam as cam 1, both on the same Mac):
 ```bash
-# Terminal 1 — receiver
-python scripts/get_frame.py --port 9000 --sync --buffer-delay-ms 100 --csv logs/ipcam_run.csv
+# Terminal 1 — receiver (TCP)
+python scripts/get_frame_tcp.py --port 9000 --sync --buffer-delay-ms 150 --csv logs/ipcam_run.csv --stream-ids 0 1
 
 # Terminal 2 — sender (both sources on the same machine)
-python scripts/transport.py --sources 0 rtsp://USERNAME:PASSWORD@192.168.2.4:554/stream1 --host 127.0.0.1 --port 9000
+python scripts/transport_tcp.py --sources 0 rtsp://USERNAME:PASSWORD@192.168.2.4:554/stream1 --host 127.0.0.1 --port 9000
 ```
-
-We ran the same three buffer-depth experiments and analysis as above, comparing the built-in webcam (30 fps) to the Tapo cam (15 fps). The framerate mismatch caused the jitter buffer to freeze on the slower stream's last frame more frequently — a known limitation documented in `results_report.md`.
 
 
